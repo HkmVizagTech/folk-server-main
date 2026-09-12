@@ -21,7 +21,23 @@ exports.createAdmin = async (data, context) => {
   const callerDoc = await db.collection('users').doc(context.auth.uid).get();
   const callerRole = callerDoc.exists ? callerDoc.data().role : null;
   const isAuthorized = callerRole === 'admin' || context.auth.uid === ROOT_ADMIN_UID;
+
+  // Bootstrap exception: until the very first admin exists on the site, ANY
+  // signed-in user may provision the shared admin login. This is what lets the
+  // site owner get started from a fresh database (there is no pre-existing
+  // admin to click "create" for them). Security returns as soon as the first
+  // admin profile exists.
+  let existingAdminCount = 0;
   if (!isAuthorized) {
+    try {
+      const adminsSnapshot = await db.collection('users').where('role', '==', 'admin').limit(1).get();
+      existingAdminCount = adminsSnapshot.size;
+    } catch (error) {
+      console.error('createAdmin: error checking existing admins:', error);
+    }
+  }
+
+  if (!isAuthorized && existingAdminCount > 0) {
     throw new Error('Admins only');
   }
 
