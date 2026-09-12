@@ -12,6 +12,18 @@ const accommodationHandler = require('./handlers/accommodationHandler');
 const paymentHandler = require('./handlers/paymentHandler');
 const sevaHandler = require('./handlers/sevaHandler');
 
+// Defense-in-depth: log and keep running instead of letting one bad request
+// (or a bug in any future handler) crash the whole process. Every route
+// handler in this file already catches its own errors, but this is a
+// last-resort net so a mistake here doesn't take down check-in, Sadhana
+// logging, and every other feature along with payments.
+process.on('unhandledRejection', (reason) => {
+  console.error('[UNHANDLED REJECTION]', reason);
+});
+process.on('uncaughtException', (err) => {
+  console.error('[UNCAUGHT EXCEPTION]', err);
+});
+
 const app = express();
 
 // Middleware
