@@ -51,17 +51,16 @@ exports.sendOtp = async (data) => {
 
   const delivered = await otpService.sendOTPviaWhatsApp(phone, code);
 
-  // In production an undeliverable OTP must surface as an error so nobody is
-  // told "OTP sent" when nothing arrived. When no Flaxxa key is configured
-  // and we're not in production, expose the code in the response so the whole
-  // flow can still be exercised end-to-end locally.
-  const isProd = process.env.NODE_ENV === 'production';
-  if (!delivered && isProd) {
+  // If a Flaxxa key is configured, a failed delivery must surface as an error
+  // so nobody is told "OTP sent" when nothing arrived. Gating on the key (not
+  // NODE_ENV) means this holds on any deployment, however NODE_ENV is set.
+  // The local dev escape hatch below only applies when no key exists at all.
+  if (otpService.isConfigured() && !delivered) {
     throw new Error('Could not send the OTP right now. Please try again in a moment.');
   }
 
   const result = { sent: delivered, ttlSeconds: otpService.OTP_TTL_MS / 1000 };
-  if (!isProd && !otpService.isConfigured()) result.devCode = code;
+  if (process.env.NODE_ENV !== 'production' && !otpService.isConfigured()) result.devCode = code;
   return result;
 };
 
