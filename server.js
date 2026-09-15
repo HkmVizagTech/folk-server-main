@@ -12,6 +12,7 @@ const accommodationHandler = require('./handlers/accommodationHandler');
 const paymentHandler = require('./handlers/paymentHandler');
 const sevaHandler = require('./handlers/sevaHandler');
 const adminHandler = require('./handlers/adminHandler');
+const otpHandler = require('./handlers/otpHandler');
 
 // Defense-in-depth: log and keep running instead of letting one bad request
 // (or a bug in any future handler) crash the whole process. Every route
@@ -120,6 +121,14 @@ app.post('/createOrder', handleOnCall(paymentHandler.createOrder));
 
 // --- ADMIN SETUP (bootstrap the shared `admin` / `admin@folk123` login) ---
 app.post('/createAdmin', handleOnCall(adminHandler.createAdmin));
+
+// --- OTP (Flaxxa WAPI WhatsApp login, no Firebase Blaze plan needed) ---
+// Both are reachable by UNAUTHENTICATED callers (the user has no Firebase
+// token yet) — that's the whole point of a login flow. Security lives in the
+// service layer: phone format checks, resend/attempt rate limiting, 5-min TTL,
+// single-use codes, and a server-only otp_codes collection.
+app.post('/sendOtp', handleOnCall(otpHandler.sendOtp));
+app.post('/verifyOtp', handleOnCall(otpHandler.verifyOtp));
 
 // Raw HTTP handlers (like webhooks)
 app.post('/razorpayWebhook', (req, res) => paymentHandler.razorpayWebhook(req, res));
