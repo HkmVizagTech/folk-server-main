@@ -244,4 +244,8 @@ app.get('/', (req, res) => {
 const PORT = process.env.PORT || 8080;
 app.listen(PORT, () => {
   console.log(`Server actively listening on port ${PORT} for Railway`);
+  // One-time (per version) phone index build, in the background.
+  broadcastHandler.ensurePhoneIndex()
+    .then((r) => console.log('[phone-index]', r.skipped ? 'already built' : `built: ${r.updated} of ${r.scanned} profiles updated`))
+    .catch((e) => console.error('[phone-index] build failed:', e.message));
 });

@@ -92,15 +92,10 @@ exports.broadcast = async (data, context) => {
   return { total: recipients.length, sent, failed };
 };
 
-/**
- * POST /backfillPhoneIndex (admin only)
- * Writes users/{uid}.phoneNormalized for every profile, so phone login can
- * find accounts with an indexed query instead of scanning the collection.
- */
-exports.backfillPhoneIndex = async (data, context) => {
-  const user = await validateAdminOrHead(context);
-  if (user.role !== 'admin') throw new functions.https.HttpsError('permission-denied', 'Admins only.');
+const PHONE_INDEX_VERSION = 1;
 
+/** Write phoneNormalized on every profile that lacks it (or has a stale one). */
+const runPhoneBackfill = async () => {
   const snap = await db.collection('users').get();
   let updated = 0;
   let batch = db.batch();
@@ -114,4 +109,29 @@ exports.backfillPhoneIndex = async (data, context) => {
   }
   if (inBatch) await batch.commit();
   return { scanned: snap.size, updated };
+};
+
+/**
+ * Runs the backfill once per deployment history (tracked in system/phoneIndex),
+ * so OTP login's indexed lookups work for existing profiles without anyone
+ * having to press a button. Safe to call on every boot.
+ */
+exports.ensurePhoneIndex = async () => {
+  const ref = db.collection('system').doc('phoneIndex');
+  const snap = await ref.get();
+  if (snap.exists && snap.data().version >= PHONE_INDEX_VERSION) return { skipped: true };
+  const result = await runPhoneBackfill();
+  await ref.set({ version: PHONE_INDEX_VERSION, ...result, builtAt: admin.firestore.FieldValue.serverTimestamp() });
+  return result;
+};
+
+/**
+ * POST /backfillPhoneIndex (admin only)
+ * Writes users/{uid}.phoneNormalized for every profile, so phone login can
+ * find accounts with an indexed query instead of scanning the collection.
+ */
+exports.backfillPhoneIndex = async (data, context) => {
+  const user = await validateAdminOrHead(context);
+  if (user.role !== 'admin') throw new functions.https.HttpsError('permission-denied', 'Admins only.');
+  return runPhoneBackfill();
 };
