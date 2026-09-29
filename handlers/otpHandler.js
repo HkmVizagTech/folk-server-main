@@ -32,19 +32,22 @@ const findUidByPhone = async (phone) => {
     }
   }
 
-  // Collect every profile that claims this number, across stored formats.
-  // The bounded scan catches '+91 98765 43210' style entries the admin
-  // console produced; fine for a community-size database.
+  // Collect every profile that claims this number. Indexed lookups only:
+  // `phoneNormalized` (written by the app and by /backfillPhoneIndex) plus the
+  // common raw formats. The old full-collection scan cost up to 1,000 reads
+  // per login, which exhausts the free Firestore quota after ~50 logins a day.
   const candidates = new Map();
-  for (const raw of [phone, e164, phone.slice(2)]) {
-    const snap = await db.collection('users').where('phone', '==', raw).limit(5).get();
-    snap.docs.forEach((doc) => candidates.set(doc.id, doc.data()));
-  }
-  const scan = await db.collection('users').limit(1000).get();
-  scan.docs.forEach((doc) => {
-    const p = doc.data().phone;
-    if (p && otpService.normalizePhone(p) === phone) candidates.set(doc.id, doc.data());
-  });
+  const local = phone.slice(2);
+  const pretty = `+91 ${local.slice(0, 5)} ${local.slice(5)}`;
+  const lookups = [
+    ['phoneNormalized', phone],
+    ['phone', phone], ['phone', e164], ['phone', local], ['phone', pretty],
+  ];
+  const snaps = await Promise.all(lookups.map(([field, value]) => db.collection('users').where(field, '==', value).limit(5).get()));
+  snaps.forEach((snap) => snap.docs.forEach((doc) => {
+    // Double-check: the stored number must really normalise to this phone.
+    if (otpService.normalizePhone(doc.data().phone) === phone) candidates.set(doc.id, doc.data());
+  }));
 
   if (candidates.size === 0) return { uid: null };
 

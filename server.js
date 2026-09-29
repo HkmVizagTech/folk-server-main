@@ -13,6 +13,7 @@ const paymentHandler = require('./handlers/paymentHandler');
 const sevaHandler = require('./handlers/sevaHandler');
 const adminHandler = require('./handlers/adminHandler');
 const otpHandler = require('./handlers/otpHandler');
+const broadcastHandler = require('./handlers/broadcastHandler');
 
 // Defense-in-depth: log and keep running instead of letting one bad request
 // (or a bug in any future handler) crash the whole process. Every route
@@ -198,6 +199,12 @@ app.post('/createAdmin', rateLimit({ name: 'createAdmin', windowMs: 15 * 60 * 10
 // an event can share one Wi-Fi address; the per-phone limits do the fine work.
 app.post('/sendOtp', rateLimit({ name: 'sendOtp', windowMs: 15 * 60 * 1000, max: 30 }), handleOnCall(otpHandler.sendOtp));
 app.post('/verifyOtp', rateLimit({ name: 'verifyOtp', windowMs: 15 * 60 * 1000, max: 100 }), handleOnCall(otpHandler.verifyOtp));
+
+// --- TEAM TOOLS ---
+// WhatsApp template broadcast to a group of members (guides: own members only).
+app.post('/broadcast', rateLimit({ name: 'broadcast', windowMs: 60 * 60 * 1000, max: 20 }), handleOnCall(broadcastHandler.broadcast));
+// One-off maintenance: index every profile's phone for fast OTP login lookups.
+app.post('/backfillPhoneIndex', rateLimit({ name: 'backfill', windowMs: 60 * 60 * 1000, max: 5 }), handleOnCall(broadcastHandler.backfillPhoneIndex));
 
 // Raw HTTP handlers (like webhooks)
 app.post('/razorpayWebhook', (req, res) => paymentHandler.razorpayWebhook(req, res));
