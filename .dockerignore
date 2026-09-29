@@ -1,0 +1,13 @@
+# Keep secrets and local clutter out of the Docker image (COPY . . copies
+# everything not listed here).
+.git
+node_modules
+npm-debug.log
+*.log
+.env
+.env.*
+serviceAccountKey*.json
+**/serviceAccountKey*.json
+*-firebase-adminsdk-*.json
+config/*.json
+debug.js

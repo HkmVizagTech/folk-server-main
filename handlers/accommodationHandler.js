@@ -5,9 +5,9 @@ const { sendTemplateMessage } = require('../services/notificationService');
 exports.updateAccommodationStatus = async (data, context) => {
   const user = await validateAdminOrHead(context);
 
-  const { reqId, status } = data; // status: 'approved' | 'rejected' | 'recommended'
+  const { reqId, status } = data || {}; // status: 'approved' | 'rejected' | 'recommended'
 
-  if (!reqId || !['approved', 'rejected', 'recommended'].includes(status)) {
+  if (typeof reqId !== 'string' || !reqId || reqId.includes('/') || !['approved', 'rejected', 'recommended'].includes(status)) {
     throw new Error('Invalid or missing parameters');
   }
 
@@ -23,9 +23,14 @@ exports.updateAccommodationStatus = async (data, context) => {
     throw new Error('Accommodation request does not exist');
   }
 
-  // Double check the request belongs to people in the folks head group
-  const targetUserDoc = await db.collection("users").doc(reqDoc.data().userId).get();
-  if (user.role === 'folks_head' && targetUserDoc.data().assignedGroup !== user.uid) {
+  const userId = reqDoc.data().userId;
+  const targetUserDoc = userId ? await db.collection("users").doc(String(userId)).get() : null;
+  const targetUser = targetUserDoc && targetUserDoc.exists ? targetUserDoc.data() : null;
+
+  // Double check the request belongs to people in the folks head group. A
+  // request whose devotee has no profile (deleted, or never created) used to
+  // crash here with a TypeError; now a folks_head simply can't act on it.
+  if (user.role === 'folks_head' && (!targetUser || targetUser.assignedGroup !== user.uid)) {
      throw new Error('Unauthorized to recommend accommodations outside your designated assigned group.');
   }
 
@@ -34,14 +39,13 @@ exports.updateAccommodationStatus = async (data, context) => {
     updatedAt: admin.firestore.FieldValue.serverTimestamp()
   });
 
-  // Notify User via Gupshup WhatsApp template (business-initiated messages must use an approved template)
-  const userId = reqDoc.data().userId;
-  if(userId) {
-     const userDoc = await db.collection("users").doc(userId).get();
-     if(userDoc.exists && userDoc.data().phone) {
-       const templateId = process.env.GUPSHUP_TEMPLATE_ACCOMMODATION_ID || 'accommodation_status_updated';
-       await sendTemplateMessage(userDoc.data().phone, templateId, [status]);
-     }
+  // Notify User via Gupshup WhatsApp template (business-initiated messages must use an approved template).
+  // The status is already saved, so a messaging failure must not fail the request.
+  if (targetUser && targetUser.phone) {
+    const templateId = process.env.GUPSHUP_TEMPLATE_ACCOMMODATION_ID || 'accommodation_status_updated';
+    await sendTemplateMessage(targetUser.phone, templateId, [status]).catch((error) => {
+      console.error('Accommodation notification failed:', error);
+    });
   }
 
   return { success: true };

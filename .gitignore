@@ -7,4 +7,9 @@ build/
 *.log
 logs/
 .DS_Store
-folkvizag-backend/config/serviceAccountKey.json
+
+# Firebase service-account keys: never commit these, wherever they're saved.
+serviceAccountKey*.json
+**/serviceAccountKey*.json
+*-firebase-adminsdk-*.json
+config/*.json

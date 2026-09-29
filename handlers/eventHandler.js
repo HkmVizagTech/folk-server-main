@@ -3,28 +3,36 @@ const { validateAdminOrHead } = require('../middlewares/auth');
 const crypto = require('crypto');
 const functions = require('firebase-functions');
 
+const optionalString = (value) => (typeof value === 'string' ? value.trim() : '');
+
 exports.createEvent = async (data, context) => {
   const user = await validateAdminOrHead(context);
-  
-  const { title, category, date, time, location, description } = data;
+  data = data && typeof data === 'object' ? data : {};
+
+  const title = optionalString(data.title);
+  const category = optionalString(data.category);
+  const date = optionalString(data.date);
 
   if (!title || !category || !date) {
     throw new functions.https.HttpsError('invalid-argument', 'Missing required event fields');
   }
 
-  // Generate unique 8-character attendance token
+  // Unique 8-character self-check-in token. It lives in `event_secrets`,
+  // which no client can read, NOT on the event itself: events are publicly
+  // readable (landing page), so a token stored there let anyone check in to
+  // any event without attending.
   const attendanceToken = crypto.randomBytes(4).toString('hex').toUpperCase();
-  const eventId = db.collection("events").doc().id;
-  
+  const eventRef = db.collection("events").doc();
+
   const eventData = {
     title,
     category,
     date,
-    time,
-    location,
-    description,
+    // Firestore rejects `undefined`, so optional fields default to ''.
+    time: optionalString(data.time),
+    location: optionalString(data.location),
+    description: optionalString(data.description),
     createdBy: user.uid,
-    attendanceToken,
     createdAt: admin.firestore.FieldValue.serverTimestamp()
   };
 
@@ -32,12 +40,18 @@ exports.createEvent = async (data, context) => {
     eventData.groupId = user.uid; // Bound to their local group explicitly
   }
 
-  await db.collection("events").doc(eventId).set(eventData);
+  const batch = db.batch();
+  batch.set(eventRef, eventData);
+  batch.set(db.collection('event_secrets').doc(eventRef.id), {
+    attendanceToken,
+    createdAt: admin.firestore.FieldValue.serverTimestamp(),
+  });
+  await batch.commit();
 
-  // Mock Notification
-  console.log(`Event ${eventId} created with token ${attendanceToken}. Notifying devotees...`);
-  
-  return { success: true, eventId, attendanceToken };
+  console.log(`Event ${eventRef.id} created. Notifying devotees...`);
+
+  // Returned only to the staff member who created it, to display as a QR.
+  return { success: true, eventId: eventRef.id, attendanceToken };
 };
 
 exports.getEvents = async () => {
@@ -46,10 +60,12 @@ exports.getEvents = async () => {
     .orderBy("date", "asc")
     .get();
 
-  const events = snapshot.docs.map((doc) => ({
-    id: doc.id,
-    ...doc.data(),
-  }));
+  // Strip the check-in token from events created before it moved to
+  // event_secrets: this endpoint is public.
+  const events = snapshot.docs.map((doc) => {
+    const { attendanceToken, ...rest } = doc.data();
+    return { id: doc.id, ...rest };
+  });
 
   return {
     success: true,

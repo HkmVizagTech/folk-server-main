@@ -8,12 +8,12 @@ WORKDIR /usr/src/app
 COPY package*.json ./
 
 # Install production dependencies.
-RUN npm install --only=production
+RUN npm install --omit=dev
 
 # Copy local code to the container image.
 COPY . .
 
 # Run the web service on container startup.
-# We use the functions-framework to serve the ping function as the default entry point for health checks.
+# server.js serves every route, including /health for the platform health check.
 # Cloud Run automatically sets the PORT environment variable.
 CMD [ "npm", "start" ]

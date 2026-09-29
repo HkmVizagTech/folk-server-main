@@ -28,8 +28,31 @@ process.on('uncaughtException', (err) => {
 
 const app = express();
 
-// Middleware
-app.use(cors({ origin: '*' })); // Allow all origins for the API
+// Railway/Render put one proxy in front of the app. Trusting exactly one hop
+// makes req.ip the real client address (used by the rate limiter below)
+// without letting a client spoof it through its own X-Forwarded-For header.
+app.set('trust proxy', 1);
+
+// CORS: set ALLOWED_ORIGINS (comma-separated, e.g.
+// "https://folkvizag.vercel.app,http://localhost:3001") to restrict which
+// websites may call the API from a browser. When it is unset every origin is
+// allowed, as before. The API authenticates with Bearer tokens rather than
+// cookies, so an open CORS policy doesn't let other sites act as a signed-in
+// user; the allowlist is extra hardening.
+const allowedOrigins = (process.env.ALLOWED_ORIGINS || '')
+  .split(',')
+  .map((o) => o.trim().replace(/\/+$/, ''))
+  .filter(Boolean);
+if (allowedOrigins.length === 0) {
+  console.warn('ALLOWED_ORIGINS is not set; the API accepts browser requests from any origin.');
+}
+app.use(cors({
+  origin: allowedOrigins.length
+    // Requests without an Origin header (curl, Razorpay's webhook, health
+    // checks) aren't browser cross-origin requests, so let them through.
+    ? (origin, cb) => cb(null, !origin || allowedOrigins.includes(origin))
+    : '*',
+}));
 app.use(express.json({
   verify: (req, res, buf) => {
     // Preserve the RAW request body before parsing so webhook signature
@@ -37,6 +60,47 @@ app.use(express.json({
     req.rawBody = buf;
   }
 }));
+
+// Small in-memory sliding-window rate limiter, keyed by client IP. It resets
+// on restart and isn't shared across replicas, which is fine for one Railway
+// instance. The OTP service also limits per phone number; this adds a per-IP
+// cap so one client can't cycle through many numbers (which costs money per
+// WhatsApp message) or spray guesses across them.
+const rateBuckets = new Map();
+const rateLimit = ({ name, windowMs, max }) => (req, res, next) => {
+  const key = `${name}:${req.ip}`;
+  const now = Date.now();
+  const hits = (rateBuckets.get(key) || []).filter((t) => now - t < windowMs);
+  if (hits.length >= max) {
+    const retryAfter = Math.ceil((windowMs - (now - hits[0])) / 1000);
+    res.set('Retry-After', String(retryAfter));
+    return res.status(429).json({
+      error: { message: 'Too many requests. Please wait a few minutes and try again.', status: 'RESOURCE_EXHAUSTED' },
+    });
+  }
+  hits.push(now);
+  rateBuckets.set(key, hits);
+  next();
+};
+// Drop idle buckets so the map can't grow without bound.
+setInterval(() => {
+  const now = Date.now();
+  for (const [key, hits] of rateBuckets) {
+    if (!hits.length || now - hits[hits.length - 1] > 60 * 60 * 1000) rateBuckets.delete(key);
+  }
+}, 10 * 60 * 1000).unref();
+
+// HttpsError codes the handlers throw, mapped to HTTP statuses. 'not-found'
+// deliberately stays 500: the client reads a 404 as "backend is an outdated
+// build without this route".
+const HTTP_STATUS_BY_CODE = {
+  'invalid-argument': 400,
+  'failed-precondition': 400,
+  'unauthenticated': 401,
+  'permission-denied': 403,
+  'already-exists': 409,
+  'resource-exhausted': 429,
+};
 
 // Helper to mimic Firebase Functions context
 const createFirebaseContext = async (req) => {
@@ -61,19 +125,22 @@ const handleOnCall = (handler) => {
     try {
       const context = await createFirebaseContext(req);
       
-      // onCall clients wrap data in `req.body.data`
-      const data = req.body.data !== undefined ? req.body.data : req.body;
-      
+      // onCall clients wrap data in `req.body.data`. req.body is undefined
+      // when the request has no JSON body (Express 5), so guard it.
+      const body = req.body && typeof req.body === 'object' ? req.body : {};
+      const data = body.data !== undefined && body.data !== null ? body.data : body;
+
       const result = await handler(data, context);
-      
+
       // Firebase onCall clients expect the result inside a "result" key natively
       res.status(200).json({ result });
     } catch (error) {
       console.error('Handler Error:', error);
-      res.status(500).json({
+      const httpStatus = HTTP_STATUS_BY_CODE[error.code] || 500;
+      res.status(httpStatus).json({
         error: {
           message: error.message || 'Internal Server Error',
-          status: 'INTERNAL'
+          status: httpStatus === 500 ? 'INTERNAL' : String(error.code).toUpperCase().replace(/-/g, '_')
         }
       });
     }
@@ -119,16 +186,18 @@ app.post('/markSevaAttendance', handleOnCall(sevaHandler.markAttendance));
 // --- PAYMENTS ---
 app.post('/createOrder', handleOnCall(paymentHandler.createOrder));
 
-// --- ADMIN SETUP (bootstrap the shared `admin` / `admin@folk123` login) ---
-app.post('/createAdmin', handleOnCall(adminHandler.createAdmin));
+// --- ADMIN SETUP (create or reset the shared `admin` login) ---
+app.post('/createAdmin', rateLimit({ name: 'createAdmin', windowMs: 15 * 60 * 1000, max: 20 }), handleOnCall(adminHandler.createAdmin));
 
 // --- OTP (Flaxxa WAPI WhatsApp login, no Firebase Blaze plan needed) ---
 // Both are reachable by UNAUTHENTICATED callers (the user has no Firebase
 // token yet) — that's the whole point of a login flow. Security lives in the
 // service layer: phone format checks, resend/attempt rate limiting, 5-min TTL,
 // single-use codes, and a server-only otp_codes collection.
-app.post('/sendOtp', handleOnCall(otpHandler.sendOtp));
-app.post('/verifyOtp', handleOnCall(otpHandler.verifyOtp));
+// The per-IP caps are generous because a whole hall of people signing up at
+// an event can share one Wi-Fi address; the per-phone limits do the fine work.
+app.post('/sendOtp', rateLimit({ name: 'sendOtp', windowMs: 15 * 60 * 1000, max: 30 }), handleOnCall(otpHandler.sendOtp));
+app.post('/verifyOtp', rateLimit({ name: 'verifyOtp', windowMs: 15 * 60 * 1000, max: 100 }), handleOnCall(otpHandler.verifyOtp));
 
 // Raw HTTP handlers (like webhooks)
 app.post('/razorpayWebhook', (req, res) => paymentHandler.razorpayWebhook(req, res));
