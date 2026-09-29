@@ -48,7 +48,7 @@ exports.verifyAttendance = async (data, context) => {
     });
   } catch (error) {
     // gRPC ALREADY_EXISTS
-    if (error.code === 6) {
+    if (error.code === 6 || error.code === 'already-exists') {
       throw new functions.https.HttpsError('already-exists', 'Self-check-in already recorded');
     }
     throw error;

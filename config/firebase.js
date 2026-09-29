@@ -31,6 +31,16 @@ admin.initializeApp({
   credential: credential || admin.credential.applicationDefault(),
 });
 
-const db = admin.firestore();
+// The Firestore database (kept for the one-time copy into Postgres and as a
+// fallback). The app itself uses `db`: Postgres whenever DATABASE_URL is set
+// (unless DATA_BACKEND=firestore), with the same API as Firestore.
+const firestore = admin.firestore();
+const usePostgres = !!process.env.DATABASE_URL && process.env.DATA_BACKEND !== 'firestore';
+let db = firestore;
+if (usePostgres) {
+  const { PgStore } = require('../db/pgstore');
+  db = new PgStore(process.env.DATABASE_URL);
+}
+console.log(`[db] Using ${usePostgres ? 'Postgres' : 'Firestore'}`);
 
-module.exports = { admin, db };
+module.exports = { admin, db, firestore, usePostgres };

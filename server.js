@@ -1,6 +1,6 @@
 const express = require('express');
 const cors = require('cors');
-const { admin } = require('./config/firebase');
+const { admin, db, usePostgres } = require('./config/firebase');
 const { sendTemplateMessage } = require('./services/notificationService');
 
 // Import Handlers
@@ -14,6 +14,8 @@ const sevaHandler = require('./handlers/sevaHandler');
 const adminHandler = require('./handlers/adminHandler');
 const otpHandler = require('./handlers/otpHandler');
 const broadcastHandler = require('./handlers/broadcastHandler');
+const dataApi = require('./db/dataApi');
+const migrate = require('./db/migrate');
 
 // Defense-in-depth: log and keep running instead of letting one bad request
 // (or a bug in any future handler) crash the whole process. Every route
@@ -101,6 +103,21 @@ const HTTP_STATUS_BY_CODE = {
   'permission-denied': 403,
   'already-exists': 409,
   'resource-exhausted': 429,
+  'aborted': 409,
+};
+
+// On the first start with Postgres the data is copied over from Firestore
+// before anything reads or writes it; requests wait for that (usually seconds).
+let dbReadyError = null;
+const dbReady = migrate.ensureMigrated()
+  .then((r) => console.log('[db] ready', r.skipped ? `(${r.skipped})` : JSON.stringify(r.counts)))
+  .catch((e) => { dbReadyError = e; console.error('[db] MIGRATION FAILED:', e); });
+const waitForDb = async (req, res, next) => {
+  await dbReady;
+  if (dbReadyError) {
+    return res.status(503).json({ error: { message: 'The database is being set up. Please try again in a minute.', status: 'UNAVAILABLE' } });
+  }
+  next();
 };
 
 // Helper to mimic Firebase Functions context
@@ -149,6 +166,7 @@ const handleOnCall = (handler) => {
 };
 
 console.log("Starting Express backend...");
+app.use((req, res, next) => (req.method === 'POST' ? waitForDb(req, res, next) : next()));
 
 // --- TESTS ---
 app.all('/ping', (req, res) => {
@@ -159,6 +177,34 @@ app.all('/ping', (req, res) => {
 app.get('/health', (req, res) => {
   res.json({ status: 'ok', uptime: process.uptime() });
 });
+
+// --- DATA (what the website used to read/write in Firestore directly) ---
+app.post('/dbGet', rateLimit({ name: 'dbRead', windowMs: 15 * 60 * 1000, max: 6000 }), handleOnCall(dataApi.dbGet));
+app.post('/dbQuery', rateLimit({ name: 'dbRead', windowMs: 15 * 60 * 1000, max: 6000 }), handleOnCall(dataApi.dbQuery));
+app.post('/dbCommit', rateLimit({ name: 'dbWrite', windowMs: 15 * 60 * 1000, max: 1500 }), handleOnCall(dataApi.dbCommit));
+app.post('/dbChanges', rateLimit({ name: 'dbChanges', windowMs: 15 * 60 * 1000, max: 4000 }), handleOnCall(dataApi.dbChanges));
+
+// Admin: row counts per table, and re-copy from Firestore (mode 'delta' only
+// fills rows untouched since the first copy; 'force' overwrites everything).
+const requireAdmin = async (context) => {
+  if (!context.auth) throw Object.assign(new Error('Please sign in first'), { code: 'unauthenticated' });
+  const u = await db.collection('users').doc(context.auth.uid).get();
+  if (!u.exists || u.data().role !== 'admin') throw Object.assign(new Error('Admins only'), { code: 'permission-denied' });
+};
+app.post('/dbStatus', handleOnCall(async (data, context) => {
+  await requireAdmin(context);
+  if (!usePostgres) return { backend: 'firestore' };
+  const tables = await db.listCollections();
+  const counts = {};
+  for (const t of tables) counts[t.id] = (await db.collection(t.id).count().get()).data().count;
+  const marker = await db.collection('system').doc('migration').get();
+  return { backend: 'postgres', counts, migration: marker.exists ? marker.data() : null };
+}));
+app.post('/dbCopyFromFirestore', rateLimit({ name: 'dbCopy', windowMs: 60 * 60 * 1000, max: 5 }), handleOnCall(async (data, context) => {
+  await requireAdmin(context);
+  const mode = data && data.mode === 'force' ? 'force' : 'delta';
+  return migrate.copyFirestoreToPostgres({ mode });
+}));
 
 // --- EVENTS ---
 app.post('/createEvent', handleOnCall(eventHandler.createEvent));
@@ -219,7 +265,7 @@ app.post('/notify', async (req, res) => {
     if (!context.auth) {
       return res.status(401).json({ error: { message: 'Unauthenticated' } });
     }
-    const userDoc = await admin.firestore().collection('users').doc(context.auth.uid).get();
+    const userDoc = await db.collection('users').doc(context.auth.uid).get();
     if (!userDoc.exists || userDoc.data().role !== 'admin') {
       return res.status(403).json({ error: { message: 'Admins only' } });
     }
@@ -247,7 +293,7 @@ const PORT = process.env.PORT || 8080;
 app.listen(PORT, () => {
   console.log(`Server actively listening on port ${PORT} for Railway`);
   // One-time (per version) phone index build, in the background.
-  broadcastHandler.ensurePhoneIndex()
+  dbReady.then(() => broadcastHandler.ensurePhoneIndex())
     .then((r) => console.log('[phone-index]', r.skipped ? 'already built' : `built: ${r.updated} of ${r.scanned} profiles updated`))
     .catch((e) => console.error('[phone-index] build failed:', e.message));
 });
