@@ -158,7 +158,9 @@ const handleOnCall = (handler) => {
       res.status(httpStatus).json({
         error: {
           message: error.message || 'Internal Server Error',
-          status: httpStatus === 500 ? 'INTERNAL' : String(error.code).toUpperCase().replace(/-/g, '_')
+          status: httpStatus === 500 ? 'INTERNAL' : String(error.code).toUpperCase().replace(/-/g, '_'),
+          // Firestore-style code ('not-found', 'aborted', ...) for the website's data layer.
+          ...(typeof error.code === 'string' && /^[a-z-]+$/.test(error.code) ? { code: error.code } : {}),
         }
       });
     }
@@ -175,7 +177,7 @@ app.all('/ping', (req, res) => {
 
 // Healthcheck (Railway healthcheck path)
 app.get('/health', (req, res) => {
-  res.json({ status: 'ok', uptime: process.uptime() });
+  res.json({ status: 'ok', uptime: process.uptime(), db: usePostgres ? 'postgres' : 'firestore', dbError: dbReadyError ? true : undefined });
 });
 
 // --- DATA (what the website used to read/write in Firestore directly) ---

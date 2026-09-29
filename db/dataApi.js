@@ -20,7 +20,7 @@ const policies = require('./policies');
 
 const HttpsError = functions.https.HttpsError;
 const MAX_WRITES = 500;
-const MAX_ROWS = 2000;
+const MAX_ROWS = 5000;
 const FILTER_OPS = new Set(['==', '!=', '<', '<=', '>', '>=', 'in', 'not-in', 'array-contains', 'array-contains-any']);
 const ISO_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
 
@@ -91,6 +91,11 @@ const toBackend = (v) => {
   return walk(v);
 };
 
+const deny = (ctx, what) => {
+  console.warn(`[db] denied ${what} for ${ctx.uid || 'signed-out'} (${ctx.role || 'no role'})`);
+  return new HttpsError('permission-denied', 'Missing or insufficient permissions.');
+};
+
 const checkData = (data) => {
   if (data === null || typeof data !== 'object' || Array.isArray(data)) {
     throw new HttpsError('invalid-argument', 'Document data must be an object');
@@ -104,9 +109,7 @@ exports.dbGet = async (data, context) => {
   const ctx = await loadCtx(context);
   const snap = await db.collection(collection).doc(id).get();
   const doc = plain(snap);
-  if (!policies.canRead(ctx, collection, id, doc)) {
-    throw new HttpsError('permission-denied', 'Missing or insufficient permissions.');
-  }
+  if (!policies.canRead(ctx, collection, id, doc)) throw deny(ctx, `read ${collection}/${id}`);
   return { id, exists: !!doc, data: doc, v: versionOf(snap) };
 };
 
@@ -114,7 +117,7 @@ exports.dbQuery = async (data, context) => {
   const collection = data && data.collection;
   if (!NAME_RE.test(String(collection || ''))) throw new HttpsError('invalid-argument', 'Bad collection');
   const ctx = await loadCtx(context);
-  if (!policies.canList(ctx, collection)) throw new HttpsError('permission-denied', 'Missing or insufficient permissions.');
+  if (!policies.canList(ctx, collection)) throw deny(ctx, `query ${collection}`);
 
   let q = db.collection(collection);
   for (const f of (data.filters || []).slice(0, 10)) {
@@ -198,7 +201,7 @@ exports.dbCommit = async (data, context) => {
       if (!before && !after) continue;
       const type = !before ? 'create' : !after ? 'delete' : 'update';
       const ok = await policies.canWrite(ctx, { collection, id, type, before, after }, env);
-      if (!ok) throw new HttpsError('permission-denied', `Missing or insufficient permissions (${collection}).`);
+      if (!ok) throw deny(ctx, `${type} ${path}`);
     }
 
     for (const w of parsed) {
