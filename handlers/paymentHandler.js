@@ -127,12 +127,94 @@ exports.createOrder = async (data, context) => {
       });
     }
 
-    return order;
+    // keyId is Razorpay's public key; the browser needs it to open checkout.
+    return { ...order, keyId: process.env.RAZORPAY_KEY_ID };
   } catch (error) {
     console.error('[RAZORPAY] createOrder failed:', error);
     // Razorpay SDK errors carry the reason in error.error.description.
     throw new Error(error?.error?.description || error.message || 'Could not create the payment order.');
   }
+};
+
+/**
+ * POST /paymentConfig (public)
+ * Whether online payment is available, plus the PUBLIC key id for checkout.
+ * Lets the website offer payment without its own VITE_RAZORPAY_KEY setting.
+ */
+exports.paymentConfig = async () => {
+  const keyId = process.env.RAZORPAY_KEY_ID || '';
+  const enabled = !!(keyId && process.env.RAZORPAY_KEY_SECRET);
+  return { enabled, keyId: enabled ? keyId : '', mode: keyId.startsWith('rzp_live_') ? 'live' : keyId ? 'test' : 'off' };
+};
+
+/**
+ * POST /verifyPayment { orderId, paymentId, signature }
+ * Called by the browser right after Razorpay checkout succeeds. Confirms the
+ * payment without depending on the webhook being configured:
+ *   1. Razorpay's checkout signature: HMAC-SHA256(orderId|paymentId, key secret)
+ *   2. the payment itself, fetched from Razorpay: same order, right amount,
+ *      captured (an authorised-only payment is captured here).
+ * Idempotent; the webhook, when configured, reaches the same state.
+ */
+exports.verifyPayment = async (data, context) => {
+  const uid = await validateAuth(context);
+  const { orderId, paymentId, signature } = data && typeof data === 'object' ? data : {};
+  const ok = (v) => typeof v === 'string' && /^[A-Za-z0-9_]{6,64}$/.test(v);
+  if (!ok(orderId) || !ok(paymentId) || typeof signature !== 'string' || !/^[a-f0-9]{64}$/.test(signature)) {
+    throw new Error('Invalid payment confirmation.');
+  }
+  const secret = process.env.RAZORPAY_KEY_SECRET;
+  if (!secret) throw new Error('Payments are not configured on the server.');
+
+  const expected = crypto.createHmac('sha256', secret).update(`${orderId}|${paymentId}`).digest('hex');
+  if (!crypto.timingSafeEqual(Buffer.from(expected, 'utf8'), Buffer.from(signature, 'utf8'))) {
+    throw new Error('Payment signature did not match.');
+  }
+
+  const paymentRef = db.collection('payments').doc(orderId);
+  const snap = await paymentRef.get();
+  if (!snap.exists || snap.data().userId !== uid) throw new Error('Payment order not found.');
+  const current = snap.data();
+  if (current.status === 'completed' && current.verified === true) return { status: 'completed' };
+
+  const rzp = getRazorpay();
+  let payment = await rzp.payments.fetch(paymentId);
+  const expectedPaise = Number.isFinite(current.amountPaise) ? current.amountPaise : toPaise(Number(current.amount) || 0);
+  if (payment.order_id !== orderId) throw new Error('This payment belongs to a different order.');
+  if (Number(payment.amount) !== expectedPaise || String(payment.currency).toUpperCase() !== 'INR') {
+    await paymentRef.set({ status: 'amount_mismatch', verified: false, paymentId, paidAmountPaise: Number(payment.amount) || null }, { merge: true });
+    throw new Error('The amount paid does not match this booking. The team will review it.');
+  }
+  if (payment.status === 'authorized') {
+    payment = await rzp.payments.capture(paymentId, expectedPaise, 'INR');
+  }
+  if (payment.status !== 'captured') {
+    throw new Error(`Payment is ${payment.status}. If money was deducted, it will be refunded automatically by Razorpay.`);
+  }
+
+  await paymentRef.set({
+    status: 'completed',
+    verified: true,
+    paymentId,
+    method: payment.method || null,
+    verifiedBy: 'checkout',
+    capturedAt: admin.firestore.FieldValue.serverTimestamp(),
+  }, { merge: true });
+  await confirmTripSeat(current);
+  console.log(`[RAZORPAY] verified payment ${paymentId} for order ${orderId}`);
+  return { status: 'completed' };
+};
+
+// A paid trip booking confirms the seat straight away (staff can still
+// change it). Only pending registrations are touched.
+const confirmTripSeat = async (payment) => {
+  if (payment.purpose !== 'trip' || !payment.tripRegistrationId) return;
+  const regRef = db.collection('trip_registrations').doc(String(payment.tripRegistrationId));
+  await db.runTransaction(async (t) => {
+    const reg = await t.get(regRef);
+    if (!reg.exists || String(reg.data().status || '').toLowerCase() !== 'pending') return;
+    t.update(regRef, { status: 'confirmed', confirmedBy: 'payment', updatedAt: admin.firestore.FieldValue.serverTimestamp() });
+  }).catch((e) => console.error('[RAZORPAY] seat confirm failed:', e.message));
 };
 
 exports.razorpayWebhook = async (req, res) => {
@@ -260,6 +342,10 @@ exports.razorpayWebhook = async (req, res) => {
       console.error(`[RAZORPAY] Amount mismatch on order ${orderId}: paid ${entity.amount} ${entity.currency}`);
     } else {
       console.log(`[RAZORPAY] ${event} for order ${orderId} -> ${outcome}`);
+    }
+    if (outcome === 'captured') {
+      const fresh = await paymentRef.get();
+      if (fresh.exists) await confirmTripSeat(fresh.data());
     }
 
     return res.status(200).send("ok");

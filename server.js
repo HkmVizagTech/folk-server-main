@@ -186,6 +186,8 @@ app.post('/markSevaAttendance', handleOnCall(sevaHandler.markAttendance));
 
 // --- PAYMENTS ---
 app.post('/createOrder', handleOnCall(paymentHandler.createOrder));
+app.post('/paymentConfig', handleOnCall(paymentHandler.paymentConfig));
+app.post('/verifyPayment', rateLimit({ name: 'verifyPayment', windowMs: 15 * 60 * 1000, max: 60 }), handleOnCall(paymentHandler.verifyPayment));
 
 // --- ADMIN SETUP (create or reset the shared `admin` login) ---
 app.post('/createAdmin', rateLimit({ name: 'createAdmin', windowMs: 15 * 60 * 1000, max: 20 }), handleOnCall(adminHandler.createAdmin));
