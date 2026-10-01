@@ -199,12 +199,25 @@ exports.deleteUpload = async (data, context) => {
  */
 exports.uploadConfig = async (_data, context) => {
   await validateAdminOrHead(context);
-  const configured = !!(
-    process.env.R2_ACCOUNT_ID &&
-    process.env.R2_ACCESS_KEY_ID &&
-    process.env.R2_SECRET_ACCESS_KEY &&
-    process.env.R2_BUCKET &&
-    process.env.R2_PUBLIC_BASE_URL
-  );
-  return { configured, maxBytes: MAX_BYTES, allowedTypes: Object.keys(ALLOWED_TYPES) };
+
+  // Report WHICH settings are absent, not just that something is. Variable
+  // NAMES are safe to return (values never are), and "R2_PUBLIC_BASE_URL is
+  // missing" is the difference between a fix and a guessing game. A value of
+  // whitespace counts as missing - that's a real way to mis-paste into a
+  // dashboard and it otherwise looks set.
+  const REQUIRED = [
+    'R2_ACCOUNT_ID',
+    'R2_ACCESS_KEY_ID',
+    'R2_SECRET_ACCESS_KEY',
+    'R2_BUCKET',
+    'R2_PUBLIC_BASE_URL',
+  ];
+  const missing = REQUIRED.filter((name) => !String(process.env[name] || '').trim());
+
+  return {
+    configured: missing.length === 0,
+    missing,
+    maxBytes: MAX_BYTES,
+    allowedTypes: Object.keys(ALLOWED_TYPES),
+  };
 };
