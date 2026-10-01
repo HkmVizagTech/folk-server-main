@@ -14,6 +14,7 @@ const sevaHandler = require('./handlers/sevaHandler');
 const adminHandler = require('./handlers/adminHandler');
 const otpHandler = require('./handlers/otpHandler');
 const broadcastHandler = require('./handlers/broadcastHandler');
+const uploadHandler = require('./handlers/uploadHandler');
 const dataApi = require('./db/dataApi');
 const migrate = require('./db/migrate');
 
@@ -57,6 +58,13 @@ app.use(cors({
     : '*',
 }));
 app.use(express.json({
+  // Express defaults to 100kb, which is too tight for this app's writes: a
+  // trip carries a long description, a day-by-day itinerary and inclusion
+  // lists, and a rejected body surfaces as an opaque 413 rather than a
+  // useful error. Images do NOT come through here at all - they go straight
+  // from the browser to R2 via a presigned URL (see handlers/uploadHandler)
+  // - so this only needs to be roomy for text.
+  limit: '2mb',
   verify: (req, res, buf) => {
     // Preserve the RAW request body before parsing so webhook signature
     // verification (Razorpay) can HMAC the exact bytes that were sent.
@@ -233,6 +241,11 @@ app.post('/getSevaParticipants', handleOnCall(sevaHandler.getSevaParticipants));
 app.post('/markSevaAttendance', handleOnCall(sevaHandler.markAttendance));
 
 // --- PAYMENTS ---
+// ---- Image uploads (Cloudflare R2, presigned straight from the browser) ----
+app.post('/getUploadUrl', rateLimit({ name: 'uploads', windowMs: 15 * 60 * 1000, max: 300 }), handleOnCall(uploadHandler.getUploadUrl));
+app.post('/deleteUpload', rateLimit({ name: 'uploads', windowMs: 15 * 60 * 1000, max: 300 }), handleOnCall(uploadHandler.deleteUpload));
+app.post('/uploadConfig', handleOnCall(uploadHandler.uploadConfig));
+
 app.post('/createOrder', handleOnCall(paymentHandler.createOrder));
 app.post('/paymentConfig', handleOnCall(paymentHandler.paymentConfig));
 app.post('/verifyPayment', rateLimit({ name: 'verifyPayment', windowMs: 15 * 60 * 1000, max: 60 }), handleOnCall(paymentHandler.verifyPayment));
