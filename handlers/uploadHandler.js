@@ -1,22 +1,20 @@
 const functions = require('firebase-functions');
 const crypto = require('crypto');
 const { S3Client, PutObjectCommand, DeleteObjectCommand } = require('@aws-sdk/client-s3');
-const { getSignedUrl } = require('@aws-sdk/s3-request-presigner');
 const { validateAdminOrHead } = require('../middlewares/auth');
 
 /**
- * Cloudflare R2 uploads, via short-lived presigned PUT URLs.
+ * Cloudflare R2 uploads, taken server-side.
  *
- * WHY PRESIGNED AND NOT AN UPLOAD ROUTE: the browser sends the image bytes
- * straight to R2 and this server never sees them. That keeps `express.json`'s
- * body limit irrelevant to images (the old inline-base64 approach blew
- * straight through it), keeps Railway's bandwidth out of the picture, and
- * means a big photo can't tie up a request worker.
+ * The browser POSTs the compressed image to us as a RAW body and this server
+ * forwards it to R2. That deliberately keeps the bucket free of any CORS
+ * policy: CORS is a browser rule, and once the request to R2 originates here
+ * instead of from a page, no browser is involved and no Origin is sent.
  *
- * The URL we hand out is deliberately narrow: it is good for ONE key, ONE
- * content type, ONE content length, for a few minutes, and it is only ever
- * issued to a signed-in admin/folks_head. A leaked URL therefore lets someone
- * write exactly the one object we already agreed to, and nothing else.
+ * The trade-off is that image bytes now travel through this service, so the
+ * route is fenced in: staff only, image content types only, a hard size cap,
+ * and the body is read as a Buffer (never parsed as JSON, which is capped far
+ * lower and would mangle binary anyway).
  */
 
 const ALLOWED_TYPES = {
@@ -26,10 +24,11 @@ const ALLOWED_TYPES = {
 };
 
 // Generous for a resized photo (the client compresses well below this), tight
-// enough that nobody parks a video in the bucket.
+// enough that nobody parks a video in the bucket. Keep in step with the
+// express.raw({ limit }) on the route in server.js.
 const MAX_BYTES = 8 * 1024 * 1024;
 
-// Everything this route can touch lives under here, so a crafted `key` can
+// Everything this route can touch lives under here, so a crafted key can
 // never reach another part of the bucket.
 const KEY_PREFIX = 'trips/';
 
@@ -54,6 +53,12 @@ const getClient = () => {
       accessKeyId: required('R2_ACCESS_KEY_ID'),
       secretAccessKey: required('R2_SECRET_ACCESS_KEY'),
     },
+    // REQUIRED FOR R2. From @aws-sdk/client-s3 v3.729.0 the SDK attaches a
+    // CRC32 checksum to PutObject by default, and R2 answers
+    // "Header 'x-amz-checksum-crc32' ... not implemented". 'WHEN_REQUIRED'
+    // stops the SDK volunteering one.
+    requestChecksumCalculation: 'WHEN_REQUIRED',
+    responseChecksumValidation: 'WHEN_REQUIRED',
   });
   return cachedClient;
 };
@@ -63,59 +68,108 @@ const publicUrlFor = (key) => {
   return `${base}/${key}`;
 };
 
+const safeFolder = (value) =>
+  String(value || 'misc').toLowerCase().replace(/[^a-z0-9-]/g, '').slice(0, 24) || 'misc';
+
 /**
- * Staff asks for permission to upload one image; we hand back a URL to PUT it
- * to and the public URL it will live at afterwards.
+ * Express route handler (NOT an onCall handler - the body is binary, so it
+ * can't go through the JSON wrapper). Mounted in server.js behind
+ * express.raw(), which leaves req.body as a Buffer.
  *
- * data: { contentType, contentLength, folder? }
+ * POST /uploadImage?folder=covers
+ *   Content-Type: image/jpeg
+ *   Authorization: Bearer <firebase id token>
+ *   body: the raw image bytes
  */
-exports.getUploadUrl = async (data, context) => {
-  const staff = await validateAdminOrHead(context);
+exports.uploadImage = async (req, res) => {
+  try {
+    // Same identity check every other staff route uses. createFirebaseContext
+    // in server.js has already verified the bearer token onto req.authContext.
+    const staff = await validateAdminOrHead(req.authContext || { auth: null });
 
-  const { contentType, contentLength, folder } = data || {};
+    const contentType = String(req.headers['content-type'] || '').split(';')[0].trim();
+    const extension = ALLOWED_TYPES[contentType];
+    if (!extension) {
+      return res.status(400).json({
+        error: { message: 'Only JPEG, PNG and WebP images can be uploaded.', status: 'INVALID_ARGUMENT' },
+      });
+    }
 
-  const extension = ALLOWED_TYPES[contentType];
-  if (!extension) {
-    throw new functions.https.HttpsError(
-      'invalid-argument',
-      'Only JPEG, PNG and WebP images can be uploaded.'
-    );
+    const body = req.body;
+    if (!Buffer.isBuffer(body) || body.length === 0) {
+      return res.status(400).json({
+        error: { message: 'No image data was received.', status: 'INVALID_ARGUMENT' },
+      });
+    }
+    if (body.length > MAX_BYTES) {
+      return res.status(413).json({
+        error: {
+          message: `Image is too large (max ${Math.round(MAX_BYTES / (1024 * 1024))} MB).`,
+          status: 'INVALID_ARGUMENT',
+        },
+      });
+    }
+
+    // Don't trust the declared content type alone - check the actual magic
+    // bytes, so a .exe renamed to image/jpeg doesn't land in the bucket.
+    const sniffed = sniffImageType(body);
+    if (!sniffed || sniffed !== contentType) {
+      return res.status(400).json({
+        error: {
+          message: 'That file does not look like a real image.',
+          status: 'INVALID_ARGUMENT',
+        },
+      });
+    }
+
+    const folder = safeFolder(req.query && req.query.folder);
+    const key = `${KEY_PREFIX}${folder}/${Date.now()}-${crypto.randomBytes(8).toString('hex')}.${extension}`;
+
+    await getClient().send(new PutObjectCommand({
+      Bucket: required('R2_BUCKET'),
+      Key: key,
+      Body: body,
+      ContentType: contentType,
+      // Long cache: object keys are unique per upload, so a changed image is
+      // always a new URL and this can never go stale.
+      CacheControl: 'public, max-age=31536000, immutable',
+    }));
+
+    console.log(`[r2] uploaded key=${key} by=${staff.uid} bytes=${body.length}`);
+    return res.status(200).json({ publicUrl: publicUrlFor(key), key, bytes: body.length });
+  } catch (error) {
+    const code = error && error.code;
+    const status =
+      code === 'unauthenticated' ? 401 :
+      code === 'permission-denied' ? 403 :
+      code === 'failed-precondition' ? 503 : 500;
+    console.error('[r2] upload failed:', error && error.message);
+    return res.status(status).json({
+      error: { message: (error && error.message) || 'Upload failed', status: String(code || 'INTERNAL').toUpperCase() },
+    });
   }
-
-  const size = Number(contentLength);
-  if (!Number.isFinite(size) || size <= 0 || size > MAX_BYTES) {
-    throw new functions.https.HttpsError(
-      'invalid-argument',
-      `Image must be between 1 byte and ${Math.round(MAX_BYTES / (1024 * 1024))} MB.`
-    );
-  }
-
-  // `folder` is a convenience for grouping (e.g. 'covers', 'locations'), never
-  // a path: strip anything that isn't a plain word so it can't escape the
-  // prefix with ../ or a leading slash.
-  const safeFolder = String(folder || 'misc').toLowerCase().replace(/[^a-z0-9-]/g, '').slice(0, 24) || 'misc';
-  const key = `${KEY_PREFIX}${safeFolder}/${Date.now()}-${crypto.randomBytes(8).toString('hex')}.${extension}`;
-
-  // Signing ContentType AND ContentLength binds the upload to exactly what was
-  // declared - the browser sets both from the Blob it sends, so a mismatch is
-  // rejected by R2 rather than quietly storing something else.
-  const command = new PutObjectCommand({
-    Bucket: required('R2_BUCKET'),
-    Key: key,
-    ContentType: contentType,
-    ContentLength: size,
-  });
-
-  const uploadUrl = await getSignedUrl(getClient(), command, { expiresIn: 300 });
-
-  console.log(`[r2] presigned upload key=${key} by=${staff.uid} bytes=${size}`);
-
-  return { uploadUrl, publicUrl: publicUrlFor(key), key, expiresIn: 300 };
 };
 
+/** Magic-number check for the three formats we accept. */
+function sniffImageType(buf) {
+  if (buf.length >= 3 && buf[0] === 0xff && buf[1] === 0xd8 && buf[2] === 0xff) return 'image/jpeg';
+  if (
+    buf.length >= 8 &&
+    buf[0] === 0x89 && buf[1] === 0x50 && buf[2] === 0x4e && buf[3] === 0x47 &&
+    buf[4] === 0x0d && buf[5] === 0x0a && buf[6] === 0x1a && buf[7] === 0x0a
+  ) return 'image/png';
+  if (
+    buf.length >= 12 &&
+    buf.toString('ascii', 0, 4) === 'RIFF' &&
+    buf.toString('ascii', 8, 12) === 'WEBP'
+  ) return 'image/webp';
+  return null;
+}
+
 /**
- * Remove an image that staff deleted from a trip, so orphans don't pile up.
- * data: { key }  (or a full public URL, which we reduce back to a key)
+ * Remove an image staff deleted from a trip, so orphans don't pile up.
+ * Stays an onCall handler - its payload is small JSON.
+ * data: { key } or { url }
  */
 exports.deleteUpload = async (data, context) => {
   await validateAdminOrHead(context);
@@ -141,7 +195,7 @@ exports.deleteUpload = async (data, context) => {
 
 /**
  * Lets the admin UI tell staff whether uploads will work before they pick a
- * file, instead of failing at save time.
+ * file, instead of failing once they've chosen one.
  */
 exports.uploadConfig = async (_data, context) => {
   await validateAdminOrHead(context);

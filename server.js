@@ -241,8 +241,31 @@ app.post('/getSevaParticipants', handleOnCall(sevaHandler.getSevaParticipants));
 app.post('/markSevaAttendance', handleOnCall(sevaHandler.markAttendance));
 
 // --- PAYMENTS ---
-// ---- Image uploads (Cloudflare R2, presigned straight from the browser) ----
-app.post('/getUploadUrl', rateLimit({ name: 'uploads', windowMs: 15 * 60 * 1000, max: 300 }), handleOnCall(uploadHandler.getUploadUrl));
+// ---- Image uploads (Cloudflare R2, taken server-side) ----
+// The browser POSTs raw image bytes here and we forward them to R2. Going
+// through this service instead of letting the browser talk to R2 directly is
+// what keeps the bucket free of a CORS policy - no browser, no Origin, no
+// preflight.
+//
+// express.raw() (not express.json()) handles this route: the body is binary,
+// and the app-level JSON parser both caps far lower and would corrupt it.
+// express.json() ignores it anyway, since it only claims application/json.
+app.post(
+  '/uploadImage',
+  rateLimit({ name: 'uploads', windowMs: 15 * 60 * 1000, max: 300 }),
+  express.raw({ type: ['image/jpeg', 'image/png', 'image/webp'], limit: '8mb' }),
+  async (req, res) => {
+    try {
+      // The raw route can't use handleOnCall, so resolve the caller here and
+      // hand the same context shape to the handler.
+      req.authContext = await createFirebaseContext(req);
+    } catch (error) {
+      console.error('uploadImage auth failed:', error && error.message);
+      req.authContext = { auth: null, rawRequest: req };
+    }
+    return uploadHandler.uploadImage(req, res);
+  }
+);
 app.post('/deleteUpload', rateLimit({ name: 'uploads', windowMs: 15 * 60 * 1000, max: 300 }), handleOnCall(uploadHandler.deleteUpload));
 app.post('/uploadConfig', handleOnCall(uploadHandler.uploadConfig));
 
