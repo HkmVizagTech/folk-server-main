@@ -1,7 +1,7 @@
 const functions = require('firebase-functions');
 const crypto = require('crypto');
 const { S3Client, PutObjectCommand, DeleteObjectCommand } = require('@aws-sdk/client-s3');
-const { validateAdminOrHead } = require('../middlewares/auth');
+const { validateAdminOrHead, validateAuth } = require('../middlewares/auth');
 
 /**
  * Cloudflare R2 uploads, taken server-side.
@@ -28,9 +28,18 @@ const ALLOWED_TYPES = {
 // express.raw({ limit }) on the route in server.js.
 const MAX_BYTES = 8 * 1024 * 1024;
 
-// Everything this route can touch lives under here, so a crafted key can
-// never reach another part of the bucket.
-const KEY_PREFIX = 'trips/';
+// Everything this route can touch lives under one of these, so a crafted key
+// can never reach another part of the bucket.
+//
+// Two prefixes, two audiences. `trips/` is the staff library: covers, galleries
+// and location photos that appear on public pages, so only staff may add to it.
+// `avatars/` is a member's own profile picture - a devotee has to be able to
+// upload one or the avatar never works for anyone but an admin - and it is
+// scoped to `avatars/<their uid>/` by the server, never by anything the browser
+// sends, so one member can't write into another's folder.
+const TRIP_PREFIX = 'trips/';
+const AVATAR_PREFIX = 'avatars/';
+const KEY_PREFIXES = [TRIP_PREFIX, AVATAR_PREFIX];
 
 const required = (name) => {
   const value = process.env[name];
@@ -83,9 +92,15 @@ const safeFolder = (value) =>
  */
 exports.uploadImage = async (req, res) => {
   try {
-    // Same identity check every other staff route uses. createFirebaseContext
-    // in server.js has already verified the bearer token onto req.authContext.
-    const staff = await validateAdminOrHead(req.authContext || { auth: null });
+    // createFirebaseContext in server.js has already verified the bearer token
+    // onto req.authContext. ?folder=avatar is the one folder any signed-in
+    // member may write to (their own avatar); everything else is staff.
+    const context = req.authContext || { auth: null };
+    const wantsAvatar = safeFolder(req.query && req.query.folder) === 'avatar';
+    // validateAuth hands back a bare uid, validateAdminOrHead a profile object.
+    const actorUid = wantsAvatar
+      ? await validateAuth(context)
+      : (await validateAdminOrHead(context)).uid;
 
     const contentType = String(req.headers['content-type'] || '').split(';')[0].trim();
     const extension = ALLOWED_TYPES[contentType];
@@ -122,8 +137,12 @@ exports.uploadImage = async (req, res) => {
       });
     }
 
-    const folder = safeFolder(req.query && req.query.folder);
-    const key = `${KEY_PREFIX}${folder}/${Date.now()}-${crypto.randomBytes(8).toString('hex')}.${extension}`;
+    const stamp = `${Date.now()}-${crypto.randomBytes(8).toString('hex')}.${extension}`;
+    const key = wantsAvatar
+      // The uid comes from the verified token, never from the request, so the
+      // folder a member writes into is not something they can choose.
+      ? `${AVATAR_PREFIX}${actorUid}/${stamp}`
+      : `${TRIP_PREFIX}${safeFolder(req.query && req.query.folder)}/${stamp}`;
 
     await getClient().send(new PutObjectCommand({
       Bucket: required('R2_BUCKET'),
@@ -135,7 +154,7 @@ exports.uploadImage = async (req, res) => {
       CacheControl: 'public, max-age=31536000, immutable',
     }));
 
-    console.log(`[r2] uploaded key=${key} by=${staff.uid} bytes=${body.length}`);
+    console.log(`[r2] uploaded key=${key} by=${actorUid} bytes=${body.length}`);
     return res.status(200).json({ publicUrl: publicUrlFor(key), key, bytes: body.length });
   } catch (error) {
     const code = error && error.code;
@@ -172,7 +191,7 @@ function sniffImageType(buf) {
  * data: { key } or { url }
  */
 exports.deleteUpload = async (data, context) => {
-  await validateAdminOrHead(context);
+  const uid = await validateAuth(context);
 
   let key = String((data && (data.key || data.url)) || '').trim();
 
@@ -180,9 +199,17 @@ exports.deleteUpload = async (data, context) => {
   const base = (process.env.R2_PUBLIC_BASE_URL || '').replace(/\/+$/, '');
   if (base && key.startsWith(base)) key = key.slice(base.length + 1);
 
-  // Refuse anything outside our own prefix, and anything with traversal in it.
-  if (!key.startsWith(KEY_PREFIX) || key.includes('..')) {
-    throw new functions.https.HttpsError('invalid-argument', 'That is not an uploaded trip image.');
+  // Refuse anything outside our own prefixes, and anything with traversal in it.
+  if (!KEY_PREFIXES.some((p) => key.startsWith(p)) || key.includes('..')) {
+    throw new functions.https.HttpsError('invalid-argument', 'That is not an uploaded FOLK image.');
+  }
+
+  // A member may delete their own old avatar (replacing a picture should not
+  // leave the previous one in the bucket forever); everything else is staff.
+  if (key.startsWith(AVATAR_PREFIX)) {
+    if (key.split('/')[1] !== uid) await validateAdminOrHead(context);
+  } else {
+    await validateAdminOrHead(context);
   }
 
   await getClient().send(new DeleteObjectCommand({
@@ -198,7 +225,9 @@ exports.deleteUpload = async (data, context) => {
  * file, instead of failing once they've chosen one.
  */
 exports.uploadConfig = async (_data, context) => {
-  await validateAdminOrHead(context);
+  // Any signed-in member can ask: the Profile page needs the same answer before
+  // it offers an avatar picker. Only variable NAMES are ever returned.
+  await validateAuth(context);
 
   // Report WHICH settings are absent, not just that something is. Variable
   // NAMES are safe to return (values never are), and "R2_PUBLIC_BASE_URL is
