@@ -92,6 +92,9 @@ const READ = {
   trip_registrations: { list: signedIn, doc: ownerOrStaff },
   payments: { list: signedIn, doc: ownerOrStaff },
   followups: { list: isStaff, doc: isStaff },
+  // First-timers at a program: personal details of people who have no
+  // account yet, so the team only.
+  visitors: { list: isStaff, doc: isStaff },
   contact_messages: { list: isStaff, doc: isStaff },
   broadcasts: { list: isStaff, doc: isStaff },
   // otp_codes, event_secrets, system: server only.
@@ -258,6 +261,26 @@ const WRITE = {
   },
 
   trips: async (ctx) => isStaff(ctx),
+
+  // A first-timer taken down at the door. The team can correct the details
+  // and tick them off once somebody has welcomed them; only an admin removes
+  // the record.
+  visitors: async (ctx, { type, before, after }) => {
+    if (!isStaff(ctx)) return false;
+    if (type === 'delete') return isSuperAdmin(ctx);
+    if (type === 'create') {
+      return typeof after.name === 'string'
+        && after.name.trim().length > 0
+        && after.name.length <= 80
+        && typeof after.eventId === 'string'
+        && after.eventId.length > 0
+        && String(after.note || '').length <= 500;
+    }
+    // Updates may not move a visitor to a different program, which would
+    // quietly change who was counted at which event.
+    if (after.eventId !== before.eventId) return false;
+    return String(after.name || '').length <= 80 && String(after.note || '').length <= 500;
+  },
 
   // Payment state is never writable from the browser: only a pointer to a
   // Razorpay order the server created for this very registration, or cash
