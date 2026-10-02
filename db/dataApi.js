@@ -49,9 +49,17 @@ const parsePath = (path) => {
 
 const loadCtx = async (context) => {
   const uid = context.auth ? context.auth.uid : null;
-  if (!uid) return { uid: null, role: null };
+  if (!uid) return { uid: null, role: null, guideId: null, stage: null };
   const snap = await db.collection('users').doc(uid).get();
-  return { uid, role: snap.exists ? (snap.data().role || null) : null };
+  const u = snap.exists ? snap.data() : null;
+  // guideId and stage decide which guide's events and which residency events
+  // this person is allowed to see (see policies.canSeeEvent).
+  return {
+    uid,
+    role: u ? (u.role || null) : null,
+    guideId: u ? (u.guideId || null) : null,
+    stage: u ? policies.stageOf(u) : null,
+  };
 };
 
 const versionOf = (snap) => {

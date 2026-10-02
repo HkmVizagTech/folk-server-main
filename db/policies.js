@@ -11,6 +11,19 @@ const { toJson } = require('./pgstore');
 
 const ROOT_ADMIN_UID = 'wRbvUaFiBOYeXEEtF8OuXnzGWXs2';
 
+// Who an event is for. 'all' is public (it also appears on folkvizag.org);
+// 'mine' is the circle of members a FOLK guide looks after; 'residents' is
+// the FOLK residency. Anything else is refused.
+const EVENT_AUDIENCES = ['all', 'mine', 'residents'];
+
+// A member's journey stage, matching the client's stageOf().
+const STAGE_IDS = ['new', 'regular', 'practising', 'committed', 'resident'];
+const stageOf = (u) => {
+  if (u && STAGE_IDS.includes(u.stage)) return u.stage;
+  const n = parseInt(u && u.level, 10);
+  return Number.isInteger(n) && n >= 1 && n <= STAGE_IDS.length ? STAGE_IDS[n - 1] : 'new';
+};
+
 // Profile fields only the team sets (guide, stage, follow-up bookkeeping).
 const STAFF_MANAGED_FIELDS = ['stage', 'level', 'guideId', 'guideName', 'guidePhone',
   'nextFollowUpDate', 'lastFollowUpAt', 'lastFollowUpNote'];
@@ -39,8 +52,29 @@ const ownerOrStaff = (ctx, id, data) => signedIn(ctx) && (!data || data.userId =
 // ------------------------------------------------------------------- reads
 // collection → (ctx, id, data) => boolean. `list` says whether a query on the
 // collection is allowed at all (results are then filtered document by document).
+/**
+ * Can this person see this event?
+ *
+ * Public events stay public (the website lists them signed out). An event a
+ * guide made for their own members is visible to that guide, to the members
+ * whose guideId is that guide, and to admins — nobody else, which is what
+ * keeps it off folkvizag.org.
+ */
+const canSeeEvent = (ctx, data) => {
+  const audience = (data && data.audience) || 'all';
+  if (audience === 'all') return true;
+  if (!signedIn(ctx)) return false;
+  if (isSuperAdmin(ctx)) return true;
+  if (data.ownerId && data.ownerId === ctx.uid) return true;
+  if (audience === 'mine') return !!ctx.guideId && ctx.guideId === data.ownerId;
+  if (audience === 'residents') return ctx.stage === 'resident' || isStaff(ctx);
+  return false;
+};
+
 const READ = {
-  events: { list: () => true, doc: () => true },
+  // Rows are filtered one by one by canSeeEvent, so a guide's private event
+  // never reaches the public site or another guide's members.
+  events: { list: () => true, doc: (ctx, id, data) => canSeeEvent(ctx, data) },
   hostel_listings: { list: () => true, doc: () => true },
   trips: { list: () => true, doc: () => true },
   notifications: { list: signedIn, doc: signedIn },
@@ -71,17 +105,47 @@ const canRead = (ctx, col, id, data) => !!READ[col] && READ[col].doc(ctx, id, da
 // other documents before / after the whole commit (like get / getAfter).
 const WRITE = {
   events: async (ctx, { type, before, after }) => {
-    if (type === 'delete') return isSuperAdmin(ctx);
-    if (type === 'create') return isStaff(ctx);
-    if (isStaff(ctx)) return true;
-    if (!signedIn(ctx)) return false;
-    if (!hasOnly(affectedKeys(before, after), ['attendingCount', 'declinedCount'])) return false;
-    for (const k of ['attendingCount', 'declinedCount']) {
-      const a = num(after[k]) ?? 0;
-      if (a < 0) return false;
-      if (k in before && ![-1, 0, 1].includes(a - (num(before[k]) ?? 0))) return false;
+    if (type === 'create') {
+      if (!isStaff(ctx)) return false;
+      const audience = after.audience || 'all';
+      if (!EVENT_AUDIENCES.includes(audience)) return false;
+      // Only an admin publishes to everyone (those events reach the website).
+      // A guide creates for their own members or for the residency, and the
+      // event is always stamped with them as the owner.
+      if (!isSuperAdmin(ctx)) {
+        if (audience === 'all') return false;
+        if (after.ownerId !== ctx.uid) return false;
+      }
+      return true;
     }
-    return true;
+
+    if (type === 'delete') {
+      return isSuperAdmin(ctx) || (isStaff(ctx) && before.ownerId === ctx.uid);
+    }
+
+    // RSVP: any signed-in member may nudge the two counters by one, and
+    // nothing else. Checked before the staff rules so staff can RSVP too.
+    const changed = affectedKeys(before, after);
+    if (hasOnly(changed, ['attendingCount', 'declinedCount'])) {
+      if (!signedIn(ctx)) return false;
+      for (const k of ['attendingCount', 'declinedCount']) {
+        const a = num(after[k]) ?? 0;
+        if (a < 0) return false;
+        if (k in before && ![-1, 0, 1].includes(a - (num(before[k]) ?? 0))) return false;
+      }
+      return true;
+    }
+
+    if (!isStaff(ctx)) return false;
+    if (isSuperAdmin(ctx)) return true;
+    // A guide edits their own event, and can neither hand it to someone else
+    // nor promote it to the public calendar.
+    if (changed.includes('ownerId')) return false;
+    if (changed.includes('audience')) {
+      if (before.ownerId !== ctx.uid) return false;
+      if (!EVENT_AUDIENCES.includes(after.audience || 'all') || (after.audience || 'all') === 'all') return false;
+    }
+    return !before.ownerId || before.ownerId === ctx.uid;
   },
 
   notifications: async (ctx, { type }) => (type === 'create' ? isStaff(ctx) : isSuperAdmin(ctx)),
@@ -116,7 +180,10 @@ const WRITE = {
     return signedIn(ctx) && after.userId === ctx.uid;
   },
 
-  attendance: async (ctx, { type }) => (type === 'delete' ? isSuperAdmin(ctx) : isStaff(ctx)),
+  // Staff record attendance (QR check-in and the roll call) and may remove a
+  // record again — un-ticking a name in the roll call deletes it, which is
+  // how "absent" is stored: no record at all.
+  attendance: async (ctx) => isStaff(ctx),
   prasadam_logs: async (ctx, { type }) => (type === 'delete' ? isSuperAdmin(ctx) : isStaff(ctx)),
 
   // Status changes go through the server's /updateAccommodationStatus.
@@ -223,4 +290,4 @@ const canWrite = async (ctx, change, env) => {
   return !!(await rule(ctx, change, env));
 };
 
-module.exports = { canList, canRead, canWrite, affectedKeys, ROOT_ADMIN_UID, READ, WRITE };
+module.exports = { canList, canRead, canWrite, affectedKeys, stageOf, canSeeEvent, ROOT_ADMIN_UID, EVENT_AUDIENCES, READ, WRITE };
