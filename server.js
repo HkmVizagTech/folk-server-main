@@ -16,6 +16,7 @@ const otpHandler = require('./handlers/otpHandler');
 const broadcastHandler = require('./handlers/broadcastHandler');
 const uploadHandler = require('./handlers/uploadHandler');
 const dataApi = require('./db/dataApi');
+const prasadamService = require('./services/prasadamService');
 const migrate = require('./db/migrate');
 
 // Defense-in-depth: log and keep running instead of letting one bad request
@@ -201,6 +202,13 @@ const requireAdmin = async (context) => {
   const u = await db.collection('users').doc(context.auth.uid).get();
   if (!u.exists || u.data().role !== 'admin') throw Object.assign(new Error('Admins only'), { code: 'permission-denied' });
 };
+// Hand out prasadam coupons for everyone marked present at a coupon event
+// right now, instead of waiting for the next minute's sweep.
+app.post('/runPrasadamSweep', rateLimit({ name: 'prasadam', windowMs: 10 * 60 * 1000, max: 30 }), handleOnCall(async (data, context) => {
+  await requireAdmin(context);
+  return prasadamService.runSweep();
+}));
+
 app.post('/dbStatus', handleOnCall(async (data, context) => {
   await requireAdmin(context);
   if (!usePostgres) return { backend: 'firestore' };
@@ -330,6 +338,9 @@ app.get('/', (req, res) => {
 const PORT = process.env.PORT || 8080;
 app.listen(PORT, () => {
   console.log(`Server actively listening on port ${PORT} for Railway`);
+  // Weekend prasadam coupons for people marked present (off unless the
+  // community app's URL and key are configured).
+  dbReady.then(() => prasadamService.startSweeper());
   // One-time (per version) phone index build, in the background.
   dbReady.then(() => broadcastHandler.ensurePhoneIndex())
     .then((r) => console.log('[phone-index]', r.skipped ? 'already built' : `built: ${r.updated} of ${r.scanned} profiles updated`))

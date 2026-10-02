@@ -95,6 +95,9 @@ const READ = {
   // First-timers at a program: personal details of people who have no
   // account yet, so the team only.
   visitors: { list: isStaff, doc: isStaff },
+  // Whether each attendee's prasadam coupon reached the community app.
+  // Written only by the server's sweep, so there is no client write rule.
+  prasadam_grants: { list: isStaff, doc: isStaff },
   contact_messages: { list: isStaff, doc: isStaff },
   broadcasts: { list: isStaff, doc: isStaff },
   // otp_codes, event_secrets, system: server only.
@@ -118,6 +121,9 @@ const WRITE = {
       if (!isSuperAdmin(ctx)) {
         if (audience === 'all') return false;
         if (after.ownerId !== ctx.uid) return false;
+        // Prasadam coupons are real meals the kitchen has to cook, so only an
+        // admin can put a program on the coupon list.
+        if (after.givesPrasadamCoupon) return false;
       }
       return true;
     }
@@ -141,6 +147,7 @@ const WRITE = {
 
     if (!isStaff(ctx)) return false;
     if (isSuperAdmin(ctx)) return true;
+    if (changed.includes('givesPrasadamCoupon')) return false;
     // A guide edits their own event, and can neither hand it to someone else
     // nor promote it to the public calendar.
     if (changed.includes('ownerId')) return false;
