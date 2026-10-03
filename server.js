@@ -16,6 +16,7 @@ const otpHandler = require('./handlers/otpHandler');
 const broadcastHandler = require('./handlers/broadcastHandler');
 const uploadHandler = require('./handlers/uploadHandler');
 const dataApi = require('./db/dataApi');
+const { runSeeds } = require('./db/seeds');
 const migrate = require('./db/migrate');
 
 // Defense-in-depth: log and keep running instead of letting one bad request
@@ -330,6 +331,8 @@ app.get('/', (req, res) => {
 const PORT = process.env.PORT || 8080;
 app.listen(PORT, () => {
   console.log(`Server actively listening on port ${PORT} for Railway`);
+  // One-off data the team could not add through the app (runs once).
+  dbReady.then(() => runSeeds());
   // One-time (per version) phone index build, in the background.
   dbReady.then(() => broadcastHandler.ensurePhoneIndex())
     .then((r) => console.log('[phone-index]', r.skipped ? 'already built' : `built: ${r.updated} of ${r.scanned} profiles updated`))
