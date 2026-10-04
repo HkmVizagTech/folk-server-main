@@ -44,6 +44,9 @@ const validTraveller = (t) => {
   if (t === null || typeof t !== 'object' || Array.isArray(t)) return false;
   const str = (v, max) => v === undefined || v === null || v === '' || (typeof v === 'string' && v.length <= max);
   if (!str(t.name, 80) || !str(t.gender, 20) || !str(t.idNumber, 40) || !str(t.relation, 40)) return false;
+  // Student details: most FOLK members are at college, and the team uses
+  // these to group boys and to plan the next campus visit.
+  if (!str(t.college, 120) || !str(t.course, 80) || !str(t.year, 24)) return false;
   if (t.idType !== undefined && t.idType !== null && t.idType !== '' && !ID_TYPES.includes(t.idType)) return false;
   if (t.age !== undefined && t.age !== null && t.age !== '') {
     const n = Number(t.age);
