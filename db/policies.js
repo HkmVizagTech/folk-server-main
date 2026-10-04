@@ -31,6 +31,27 @@ const STAFF_MANAGED_FIELDS = ['stage', 'level', 'guideId', 'guideName', 'guidePh
 const TRIP_STAFF_FIELDS = ['status', 'staffNotes', 'updatedAt',
   'cashCollected', 'cashAmount', 'cashCollectedAt', 'cashCollectedBy'];
 
+// What a devotee may fill in about their own booking after it is made.
+// Booking is kept short so a seat can be taken in seconds; these are the
+// details the team needs afterwards to buy tickets. Deliberately excludes
+// seats, status and anything to do with payment.
+const TRIP_OWNER_DETAIL_FIELDS = ['travellers', 'emergencyContact', 'pickup', 'travellerNotes', 'updatedAt'];
+
+const ID_TYPES = ['aadhaar', 'pan', 'passport', 'voter', 'driving', 'student', 'other'];
+
+/** One traveller's details, as typed by the devotee. */
+const validTraveller = (t) => {
+  if (t === null || typeof t !== 'object' || Array.isArray(t)) return false;
+  const str = (v, max) => v === undefined || v === null || v === '' || (typeof v === 'string' && v.length <= max);
+  if (!str(t.name, 80) || !str(t.gender, 20) || !str(t.idNumber, 40) || !str(t.relation, 40)) return false;
+  if (t.idType !== undefined && t.idType !== null && t.idType !== '' && !ID_TYPES.includes(t.idType)) return false;
+  if (t.age !== undefined && t.age !== null && t.age !== '') {
+    const n = Number(t.age);
+    if (!Number.isFinite(n) || n < 1 || n > 120) return false;
+  }
+  return true;
+};
+
 const same = (a, b) => JSON.stringify(toJson(a) ?? null) === JSON.stringify(toJson(b) ?? null);
 const keysOf = (d) => Object.keys(d || {});
 const affectedKeys = (before, after) => {
@@ -275,6 +296,24 @@ const WRITE = {
     const changed = affectedKeys(before, after);
     if (isStaff(ctx) && hasOnly(changed, TRIP_STAFF_FIELDS)) return true;
     if (ctx.uid !== before.userId) return false;
+
+    // Filling in who is travelling, after the seat is taken. A cancelled
+    // booking is left alone, and there can never be more travellers than
+    // seats paid for.
+    if (hasOnly(changed, TRIP_OWNER_DETAIL_FIELDS)) {
+      if (String(before.status || '').toLowerCase() === 'cancelled') return false;
+      const list = after.travellers;
+      if (list !== undefined && list !== null) {
+        if (!Array.isArray(list)) return false;
+        const seats = Number(before.seats) || 0;
+        if (list.length > seats) return false;
+        if (!list.every(validTraveller)) return false;
+      }
+      if (String(after.emergencyContact || '').length > 120) return false;
+      if (String(after.pickup || '').length > 120) return false;
+      if (String(after.travellerNotes || '').length > 500) return false;
+      return true;
+    }
     if (hasOnly(changed, ['paymentOrderId', 'updatedAt']) && typeof after.paymentOrderId === 'string') {
       const order = await env.getBefore(`payments/${after.paymentOrderId}`);
       if (order && order.userId === ctx.uid && (order.tripRegistrationId || '') === id) return true;
@@ -290,4 +329,4 @@ const canWrite = async (ctx, change, env) => {
   return !!(await rule(ctx, change, env));
 };
 
-module.exports = { canList, canRead, canWrite, affectedKeys, stageOf, canSeeEvent, ROOT_ADMIN_UID, EVENT_AUDIENCES, READ, WRITE };
+module.exports = { canList, canRead, canWrite, affectedKeys, stageOf, canSeeEvent, validTraveller, ROOT_ADMIN_UID, EVENT_AUDIENCES, ID_TYPES, TRIP_OWNER_DETAIL_FIELDS, READ, WRITE };
