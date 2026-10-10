@@ -1,19 +1,19 @@
-# Use the official Node.js 20 image.
+# Official Node.js 20 image.
 FROM node:20-slim
 
-# Create and change to the app directory.
+ENV NODE_ENV=production
 WORKDIR /usr/src/app
 
-# Copy application dependency manifests to the container image.
+# Install production dependencies first so this layer is cached between code changes.
 COPY package*.json ./
+RUN npm ci --omit=dev && npm cache clean --force
 
-# Install production dependencies.
-RUN npm install --omit=dev
+# Copy only what the server needs at runtime (see .dockerignore).
+COPY src ./src
 
-# Copy local code to the container image.
-COPY . .
+# Drop root privileges.
+USER node
 
-# Run the web service on container startup.
-# server.js serves every route, including /health for the platform health check.
-# Cloud Run automatically sets the PORT environment variable.
-CMD [ "npm", "start" ]
+# Cloud Run / Railway set PORT. /health is the platform health-check path.
+# Run node directly (not via npm) so SIGTERM reaches the graceful-shutdown handler.
+CMD ["node", "src/server.js"]

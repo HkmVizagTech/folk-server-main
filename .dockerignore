@@ -1,13 +1,18 @@
-# Keep secrets and local clutter out of the Docker image (COPY . . copies
-# everything not listed here).
+# Keep secrets and local clutter out of the build context.
 .git
+.gitignore
 node_modules
 npm-debug.log
 *.log
 .env
 .env.*
+!.env.example
 serviceAccountKey*.json
 **/serviceAccountKey*.json
 *-firebase-adminsdk-*.json
-config/*.json
-debug.js
+src/config/*.json
+scripts
+README.md
+Dockerfile
+.dockerignore
+eslint.config.js
