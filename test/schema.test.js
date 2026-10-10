@@ -38,7 +38,7 @@ test('registry: 23 typed collections, every table has the bookkeeping columns', 
       const got = byName.get(c.name);
       assert.ok(got, `${s.table}.${c.name} missing in the database`);
       assert.equal(got.data_type, PG_TYPE[c.type], `${s.table}.${c.name} type`);
-      assert.equal(got.is_nullable, 'YES', `${s.table}.${c.name} must be nullable (absent keys are representable)`);
+      assert.equal(got.is_nullable, c.derived ? 'NO' : 'YES', `${s.table}.${c.name} nullability (absent keys are representable; derived columns are NOT NULL DEFAULT 0)`);
       if (c.type === 'numeric') assert.deepEqual([got.numeric_precision, got.numeric_scale], [12, 2]);
     }
     const expected = new Set(['id', 'extra', 'version', 'created_at', 'updated_at', ...s.columns.map((c) => c.name)]);

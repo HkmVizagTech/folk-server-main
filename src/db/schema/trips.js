@@ -12,6 +12,8 @@ module.exports = {
     t.date('startDate'), t.date('endDate'), t.text('durationLabel'),
     t.numeric('price', { min: 0 }), t.numeric('originalPrice', { min: 0 }), t.numeric('advanceAmount', { min: 0 }),
     t.int('capacity', { min: 0 }), t.text('eligibility'),
+    // Trigger-maintained (migration 003): seats of pending|confirmed bookings. Whatever a writer sends is replaced.
+    t.int('seatsTaken', { min: 0, derived: true }),
     t.text('status', { enum: ['draft', 'upcoming', 'ongoing', 'completed', 'cancelled'] }),
     t.bool('registrationOpen'), t.bool('onlinePaymentEnabled'), t.bool('cashPaymentEnabled'),
     t.textArray('highlights'), t.textArray('inclusions'), t.textArray('exclusions'),

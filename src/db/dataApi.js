@@ -29,7 +29,13 @@ const ISO_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
 // refresh within seconds instead of polling everything.
 const feed = new ChangeFeed();
 const noteChange = (collection) => feed.note(collection);
-if (usePostgres) db.onWrite = (c) => noteChange(c.collection);
+if (usePostgres) {
+  db.onWrite = (c) => {
+    noteChange(c.collection);
+    // A booking moves trips.seatsTaken (database trigger), so open trip pages refresh too.
+    if (c.collection === 'trip_registrations') noteChange('trips');
+  };
+}
 
 // ---------------------------------------------------------------- helpers
 const parsePath = (path) => {
@@ -221,3 +227,4 @@ exports.dbCommit = async (data, context) => {
 exports.dbChanges = async (data) => feed.since(data && data.since);
 
 exports._noteChange = noteChange;
+exports.loadCtx = loadCtx;

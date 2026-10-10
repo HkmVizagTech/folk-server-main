@@ -30,8 +30,8 @@ const demote = (adapter, enc, doc, colNames) => {
   for (const name of colNames) {
     const col = schema.byName.get(name);
     if (!col) continue;
-    const i = schema.columns.indexOf(col);
-    if (values[i] !== null) { extra[col.key] = doc[col.key]; values[i] = null; }
+    const i = adapter.valueIndex(col);
+    if (i >= 0 && values[i] !== null) { extra[col.key] = doc[col.key]; values[i] = null; }
   }
   values[values.length - 1] = JSON.stringify(extra);
   return { values, diverted: enc.diverted };

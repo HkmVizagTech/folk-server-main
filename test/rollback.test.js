@@ -68,7 +68,7 @@ test('rollback restores the generic tables with every write made since the migra
 
   // forward again from the restored generic tables: same documents as before the rollback
   const again = await migrate(pool, { log: quiet });
-  assert.deepEqual(again.applied.map((m) => m.version), ['001', '002']);
+  assert.deepEqual(again.applied.map((m) => m.version), ['001', '002', '003']);
   store = new PgStore(dbh.url, { max: 3 });
   assert.deepEqual(await snapshotAll(store), before);
   assert.deepEqual(toJson((await store.collection('trips').doc('tripNew').get()).data()), extra.tripNew);

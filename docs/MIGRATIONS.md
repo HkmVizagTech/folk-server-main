@@ -74,6 +74,15 @@ Every document that was inserted reads back **deep-equal** through the store (th
 Environment: `PG_POOL_MAX` (default 10 connections), `DB_AUTO_MIGRATE` (default `true`); the existing `DATABASE_URL`.
 The container image only needs `src/` (migrations are under `src/db/migrations`); `scripts/` is for use from a checkout.
 
+## 003: trip capacity
+
+`003_trip_capacity.sql` runs automatically on boot like the others (seconds; it adds `trips.seats_taken`, backfills it, creates three
+triggers and a few `folk_*` SQL functions). It is additive: a previous server build keeps working against it (it never names the new column), and the
+triggers also enforce capacity for it. Check afterwards: `SELECT id, capacity, seats_taken FROM trips;` should equal the pending|confirmed seats per trip.
+If a trip was already oversold, nothing breaks: only bookings that add seats are refused. Undo by hand (not needed for the typed-to-generic rollback, which keeps the
+column in `typed_backup_trips`): `DROP TRIGGER trips_seats_guard ON trips; DROP TRIGGER trip_registrations_capacity ON trip_registrations; DROP TRIGGER trip_registrations_sync ON trip_registrations; ALTER TABLE trips DROP COLUMN seats_taken;`
+and delete the `003` row from `schema_migrations`.
+
 ## Rollback (reverse migration)
 
 Writes made after the migration exist only in the typed tables, so simply renaming `legacy_*` back would lose

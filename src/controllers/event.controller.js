@@ -3,6 +3,8 @@ const { validateAdminOrHead } = require('../middlewares/auth');
 const crypto = require('crypto');
 const { HttpsError } = require('../utils/errors');
 const { optionalString, asObject } = require('../utils/ids');
+const policies = require('../db/policies');
+const { loadCtx } = require('../db/dataApi');
 const log = require('../utils/logger').create('event');
 
 exports.createEvent = async (data, context) => {
@@ -40,6 +42,18 @@ exports.createEvent = async (data, context) => {
     eventData.groupId = user.uid; // Bound to their local group explicitly
   }
 
+  // Optional audience, with the same rules as the data API's events policy:
+  // an admin may publish to anyone, a folks head only to their own members
+  // or the residency. Left out = public, as before.
+  const audience = optionalString(data.audience);
+  if (audience) {
+    if (!policies.EVENT_AUDIENCES.includes(audience) || (audience === 'all' && user.role !== 'admin')) {
+      throw new HttpsError('invalid-argument', 'Invalid audience for this event');
+    }
+    eventData.audience = audience;
+    eventData.ownerId = user.uid;
+  }
+
   const batch = db.batch();
   batch.set(eventRef, eventData);
   batch.set(db.collection('event_secrets').doc(eventRef.id), {
@@ -54,7 +68,8 @@ exports.createEvent = async (data, context) => {
   return { success: true, eventId: eventRef.id, attendanceToken };
 };
 
-exports.getEvents = async () => {
+exports.getEvents = async (data, context) => {
+  const ctx = await loadCtx(context || {});
   const snapshot = await db
     .collection("events")
     .orderBy("date", "asc")
@@ -62,10 +77,14 @@ exports.getEvents = async () => {
 
   // Strip the check-in token from events created before it moved to
   // event_secrets: this endpoint is public.
-  const events = snapshot.docs.map((doc) => {
-    const { attendanceToken, ...rest } = doc.data();
-    return { id: doc.id, ...rest };
-  });
+  // Same audience rule as /dbQuery: 'mine' / 'residents' events only reach
+  // the people they are for, never the public.
+  const events = snapshot.docs
+    .map((doc) => {
+      const { attendanceToken, ...rest } = doc.data();
+      return { id: doc.id, ...rest };
+    })
+    .filter((e) => policies.canSeeEvent(ctx, e));
 
   return {
     success: true,

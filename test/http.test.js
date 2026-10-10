@@ -79,7 +79,7 @@ after(async () => {
 
 test('boot: schema migrated automatically, legacy marker preserved, no Firestore copy attempted', async () => {
   const { rows } = await pool.query('SELECT version FROM schema_migrations ORDER BY version');
-  assert.deepEqual(rows.map((r) => r.version), ['001', '002']);
+  assert.deepEqual(rows.map((r) => r.version), ['001', '002', '003']);
   const legacy = await pool.query("SELECT count(*)::int n FROM legacy_system");
   assert.equal(legacy.rows[0].n, 1);
   const marker = await pool.query("SELECT completed_at, counts FROM system WHERE id = 'migration'");

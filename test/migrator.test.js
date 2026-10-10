@@ -25,7 +25,7 @@ const put = (name, body) => fs.writeFileSync(path.join(dir, name), body);
 
 test('the shipped migrations are numbered and uniquely versioned', () => {
   const list = listMigrations();
-  assert.deepEqual(list.map((m) => m.file), ['001_typed_schema.sql', '002_import_legacy_documents.js']);
+  assert.deepEqual(list.map((m) => m.file), ['001_typed_schema.sql', '002_import_legacy_documents.js', '003_trip_capacity.sql']);
 });
 
 test('concurrent runners take turns: each migration is applied exactly once', async () => {

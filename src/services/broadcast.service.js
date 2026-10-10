@@ -3,18 +3,11 @@
 const { db, admin } = require('../config/firebase');
 const { sendTemplateMessage } = require('./notification.service');
 const { normalizePhone, isValidIndianPhone } = require('../utils/phone');
+const { STAGE_IDS: STAGES, stageOf } = require('../utils/stages'); // one shared copy of the client's stageOf()
 
 const MAX_RECIPIENTS = 300;
 const CONCURRENCY = 5;
-const STAGES = ['new', 'regular', 'practising', 'committed', 'resident'];
 const PHONE_INDEX_VERSION = 1;
-
-// Mirrors the client's stageOf(): `stage`, else the older numeric `level`.
-const stageOf = (u) => {
-  if (STAGES.includes(u.stage)) return u.stage;
-  const n = parseInt(u.level, 10);
-  return Number.isInteger(n) && n >= 1 && n <= STAGES.length ? STAGES[n - 1] : 'new';
-};
 
 /**
  * Resolve the unique, valid phone numbers of an audience. Recipients are

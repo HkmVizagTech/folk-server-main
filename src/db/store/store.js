@@ -78,6 +78,7 @@ class PgStore {
     const report = newReport();
     try {
       await client.query('BEGIN');
+      await client.query("SET LOCAL folk.import = 'on'"); // existing data may already exceed a trip's capacity
       await importDocs(client, collection, docs, { mode, migration, report });
       await client.query('COMMIT');
     } catch (e) {

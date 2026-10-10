@@ -22,7 +22,7 @@ const checksFor = (s, c) => {
 
 const tableSql = (s) => {
   const lines = ['  "id" text PRIMARY KEY'];
-  for (const c of s.columns) lines.push(`  ${q(c.name)} ${c.sqlType}`);
+  for (const c of s.columns) lines.push(`  ${q(c.name)} ${c.sqlType}${c.derived ? ' NOT NULL DEFAULT 0' : ''}`);
   lines.push(`  "extra" jsonb NOT NULL DEFAULT '{}'::jsonb`);
   lines.push('  "version" bigint NOT NULL DEFAULT 1');
   lines.push('  "created_at" timestamptz NOT NULL DEFAULT now()');

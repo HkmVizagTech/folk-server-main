@@ -76,6 +76,7 @@ const planPatch = (adapter, patch, mode, nowIso) => {
     if (raw === undefined) continue;
     if (mode === 'update' && key.includes('.')) return null;
     const col = schema.byKey.get(key);
+    if (col && col.derived) continue; // maintained by the database
     const s = sentinel(raw);
     let value;
     if (s) {

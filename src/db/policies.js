@@ -16,13 +16,8 @@ const ROOT_ADMIN_UID = 'wRbvUaFiBOYeXEEtF8OuXnzGWXs2';
 // the FOLK residency. Anything else is refused.
 const EVENT_AUDIENCES = ['all', 'mine', 'residents'];
 
-// A member's journey stage, matching the client's stageOf().
-const STAGE_IDS = ['new', 'regular', 'practising', 'committed', 'resident'];
-const stageOf = (u) => {
-  if (u && STAGE_IDS.includes(u.stage)) return u.stage;
-  const n = parseInt(u && u.level, 10);
-  return Number.isInteger(n) && n >= 1 && n <= STAGE_IDS.length ? STAGE_IDS[n - 1] : 'new';
-};
+// A member's journey stage, matching the client's stageOf() (one shared module).
+const { stageOf } = require('../utils/stages');
 
 // Profile fields only the team sets (guide, stage, follow-up bookkeeping).
 const STAFF_MANAGED_FIELDS = ['stage', 'level', 'guideId', 'guideName', 'guidePhone',
@@ -66,12 +61,87 @@ const hasAny = (keys, list) => keys.some((k) => list.includes(k));
 const num = (v) => (typeof v === 'number' && Number.isFinite(v) ? v : null);
 
 const signedIn = (ctx) => !!ctx.uid;
+// A member creating their own profile starts with an empty chanting record.
+const freshSadhanaSummary = (u) => ['streak', 'longestStreak', 'score'].every((k) => u[k] === undefined || u[k] === 0);
 const isStaff = (ctx) => ctx.role === 'admin' || ctx.role === 'folks_head';
 const isSuperAdmin = (ctx) => ctx.role === 'admin';
 
 // "Owner or staff" read used by most per-person collections. A missing
 // document is readable (nothing to leak), like `resource == null` in the rules.
 const ownerOrStaff = (ctx, id, data) => signedIn(ctx) && (!data || data.userId === ctx.uid || isStaff(ctx));
+
+// ------------------------------------------------------------ sadhana limits
+// Derived from the client's sadhanaTx.js: a day's log score is rounds * 2, plus
+// 10 once the target is reached, plus a streak bonus when the new streak is
+// exactly 3 / 7 / 30 days.
+const SADHANA_MAX_ROUNDS = 64;
+const SADHANA_MIN_TARGET = 8;
+const SADHANA_MAX_TARGET = 64;
+const SADHANA_COMPLETION_TARGET = 16; // what admins / folks heads must reach
+const SADHANA_BONUS = { 3: 20, 7: 50, 30: 200 };
+const SADHANA_MAX_LOG_SCORE = SADHANA_MAX_ROUNDS * 2 + 10 + Math.max(...Object.values(SADHANA_BONUS));
+const SADHANA_USER_FIELDS = ['streak', 'longestStreak', 'score', 'lastSadhanaDate', 'lastCompletedSadhanaDate'];
+
+const istDate = (d) => new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Kolkata', year: 'numeric', month: '2-digit', day: '2-digit' }).format(d);
+const todayIST = () => istDate(new Date());
+const yesterdayIST = () => istDate(new Date(Date.now() - 24 * 60 * 60 * 1000));
+const isRecentSadhanaDate = (d) => typeof d === 'string' && (d === todayIST() || d === yesterdayIST());
+
+const isNonNegInt = (v) => Number.isInteger(v) && v >= 0;
+const maxLogScore = (rounds, completed, streak) => rounds * 2 + (completed ? 10 + (SADHANA_BONUS[streak] || 0) : 0);
+
+/** Is this the write of a sadhana log the real client could have produced? (`before` null = create.) */
+const validSadhanaLog = async (ctx, id, before, after, env) => {
+  if (after.userId !== ctx.uid || id !== `${ctx.uid}_${after.date}` || !isRecentSadhanaDate(after.date)) return false;
+  const rounds = after.roundsCompleted === undefined ? 0 : after.roundsCompleted;
+  const score = after.score === undefined ? 0 : after.score;
+  const streak = after.streak === undefined ? 0 : after.streak;
+  if (!isNonNegInt(rounds) || rounds > SADHANA_MAX_ROUNDS || !isNonNegInt(score) || !isNonNegInt(streak)) return false;
+  // Logs written before targets were stored count as 16, like the client's `old.target || 16`.
+  const target = after.target === undefined && before && before.target === undefined ? SADHANA_COMPLETION_TARGET : after.target;
+  if (!Number.isInteger(target) || target < SADHANA_MIN_TARGET || target > SADHANA_MAX_TARGET) return false;
+  const profile = (await env.getBefore(`users/${ctx.uid}`)) || {};
+  const carried = isNonNegInt(profile.streak) ? profile.streak : 0;
+
+  if (!before) {
+    // Taking the vow: nothing achieved yet, and the chain walked in with is the most it can carry.
+    return rounds === 0 && score === 0 && !after.completed && streak <= carried;
+  }
+  if (before.userId !== ctx.uid || after.date !== before.date || !same(after.target, before.target)) return false;
+  const effectiveTarget = isStaff(ctx) ? SADHANA_COMPLETION_TARGET : target;
+  const done = rounds >= effectiveTarget;
+  if ((after.completed === undefined ? false : after.completed) !== done) return false;
+  if (streak > carried + 1) return false;
+  return score <= maxLogScore(rounds, done, streak) && score <= SADHANA_MAX_LOG_SCORE;
+};
+
+/** An owner's change to the chanting summary on their own profile, bounded by what one log write can do. */
+const validSadhanaProfile = async (ctx, id, before, after, env) => {
+  const num0 = (v) => (v === undefined || v === null ? 0 : v);
+  for (const k of ['streak', 'longestStreak', 'score']) if (!isNonNegInt(num0(after[k]))) return false;
+  for (const k of ['lastSadhanaDate', 'lastCompletedSadhanaDate']) {
+    if (after[k] !== undefined && after[k] !== null && !isRecentSadhanaDate(after[k])
+        && !same(after[k], (before || {})[k])) return false;
+  }
+  const was = { streak: num0(before && before.streak), longest: num0(before && before.longestStreak), score: num0(before && before.score) };
+  const now = { streak: num0(after.streak), longest: num0(after.longestStreak), score: num0(after.score) };
+  if (now.streak > was.streak + 1 || now.longest > Math.max(was.longest, now.streak)) return false;
+  const gain = now.score - was.score;
+  if (gain > SADHANA_MAX_LOG_SCORE) return false;
+  if (gain > 0 || now.streak > was.streak) {
+    // Going up needs today's (or yesterday's) log in the same commit, and the
+    // profile can rise by no more than that log did.
+    const date = after.lastSadhanaDate;
+    if (!isRecentSadhanaDate(date)) return false;
+    const path = `sadhana_logs/${id}_${date}`;
+    const logAfter = await env.getAfter(path);
+    if (!logAfter || logAfter.userId !== id) return false;
+    const logBefore = await env.getBefore(path);
+    if (gain > (num(logAfter.score) ?? 0) - (num(logBefore && logBefore.score) ?? 0)) return false;
+    if (now.streak > was.streak && !(logAfter.completed === true && !(logBefore && logBefore.completed === true))) return false;
+  }
+  return true;
+};
 
 // ------------------------------------------------------------------- reads
 // collection → (ctx, id, data) => boolean. `list` says whether a query on the
@@ -174,12 +244,12 @@ const WRITE = {
 
   notifications: async (ctx, { type }) => (type === 'create' ? isStaff(ctx) : isSuperAdmin(ctx)),
 
-  users: async (ctx, { type, id, before, after }) => {
+  users: async (ctx, { type, id, before, after }, env) => {
     if (!signedIn(ctx)) return false;
     if (type === 'delete') return isSuperAdmin(ctx);
     const isRoot = ctx.uid === ROOT_ADMIN_UID;
     if (type === 'create') {
-      if (ctx.uid === id && !hasAny(keysOf(after), STAFF_MANAGED_FIELDS)
+      if (ctx.uid === id && !hasAny(keysOf(after), STAFF_MANAGED_FIELDS) && freshSadhanaSummary(after)
           && ((isRoot && after.role === 'admin') || (!isRoot && after.role === 'devotee'))) return true;
       if (isStaff(ctx) && after.role === 'devotee') return true;
       return isSuperAdmin(ctx);
@@ -188,7 +258,9 @@ const WRITE = {
     if (ctx.uid === id && isRoot) return true;
     const changed = affectedKeys(before, after);
     if (changed.includes('role')) return false;
-    if (ctx.uid === id && !hasAny(changed, STAFF_MANAGED_FIELDS)) return true;
+    if (ctx.uid === id && !hasAny(changed, STAFF_MANAGED_FIELDS)) {
+      return !hasAny(changed, SADHANA_USER_FIELDS) || validSadhanaProfile(ctx, id, before, after, env);
+    }
     return isStaff(ctx) && (before.role || 'devotee') === 'devotee';
   },
 
@@ -199,9 +271,12 @@ const WRITE = {
     return isStaff(ctx) || (ctx.uid === before.userId && after.userId === before.userId && same(after.eventId, before.eventId));
   },
 
-  sadhana_logs: async (ctx, { type, after }) => {
+  // The client writes two shapes (see validSadhanaLog): the vow (create) and the
+  // day's rounds (update). Anything the client formula cannot produce is refused.
+  sadhana_logs: async (ctx, { type, id, before, after }, env) => {
     if (type === 'delete') return isSuperAdmin(ctx);
-    return signedIn(ctx) && after.userId === ctx.uid;
+    if (!signedIn(ctx)) return false;
+    return validSadhanaLog(ctx, id, type === 'create' ? null : before, after, env);
   },
 
   // Staff record attendance (QR check-in and the roll call) and may remove a
@@ -281,7 +356,14 @@ const WRITE = {
       && typeof after.message === 'string' && after.message.length <= 2000;
   },
 
-  trips: async (ctx) => isStaff(ctx),
+  // seatsTaken is maintained by the database (migration 003); a write that
+  // tries to set it to something else is refused. Absent = left alone.
+  trips: async (ctx, { type, before, after }) => {
+    if (!isStaff(ctx)) return false;
+    if (type === 'delete' || !after || !('seatsTaken' in after)) return true;
+    const current = type === 'create' ? 0 : (num(before && before.seatsTaken) ?? 0);
+    return after.seatsTaken === current;
+  },
 
   // Payment state is never writable from the browser: only a pointer to a
   // Razorpay order the server created for this very registration, or cash
@@ -332,4 +414,4 @@ const canWrite = async (ctx, change, env) => {
   return !!(await rule(ctx, change, env));
 };
 
-module.exports = { canList, canRead, canWrite, affectedKeys, stageOf, canSeeEvent, validTraveller, ROOT_ADMIN_UID, EVENT_AUDIENCES, ID_TYPES, TRIP_OWNER_DETAIL_FIELDS, READ, WRITE };
+module.exports = { SADHANA_MAX_LOG_SCORE, canList, canRead, canWrite, affectedKeys, stageOf, canSeeEvent, validTraveller, ROOT_ADMIN_UID, EVENT_AUDIENCES, ID_TYPES, TRIP_OWNER_DETAIL_FIELDS, READ, WRITE };

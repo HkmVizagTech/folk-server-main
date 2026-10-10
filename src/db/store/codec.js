@@ -94,7 +94,7 @@ const q = (n) => `"${n}"`;
 
 // ----------------------------------------------------------- typed adapter
 const typedAdapter = (schema) => {
-  const cols = schema.columns;
+  const cols = schema.columns.filter((c) => !c.derived); // columns the store writes
   const writeColumns = [
     { name: 'id', cast: 'text' },
     ...cols.map((c) => ({ name: c.name, cast: CASTS[c.type] })),
@@ -103,6 +103,8 @@ const typedAdapter = (schema) => {
   return {
     typed: true,
     schema,
+    /** Position of a written column in encode()'s values (-1 for derived columns). */
+    valueIndex: (col) => cols.indexOf(col),
     collection: schema.collection,
     table: q(schema.table),
     idCol: 'id',
@@ -121,6 +123,7 @@ const typedAdapter = (schema) => {
       const diverted = [];
       for (const [k, v] of Object.entries(doc)) {
         const col = schema.byKey.get(k);
+        if (col && col.derived) continue; // maintained by the database; a written value is ignored
         if (!col) { extra.push([k, v]); continue; }
         if (v === null) { extra.push([k, null]); continue; }
         const c = coerce(col, v);
@@ -133,7 +136,7 @@ const typedAdapter = (schema) => {
     decode(row) {
       const extra = row.extra || {};
       const out = [];
-      for (const c of cols) {
+      for (const c of schema.columns) {
         const v = row[c.name];
         if (v !== null && v !== undefined) out.push([c.key, fromSql(c, v)]);
         else if (Object.prototype.hasOwnProperty.call(extra, c.key)) out.push([c.key, extra[c.key]]);

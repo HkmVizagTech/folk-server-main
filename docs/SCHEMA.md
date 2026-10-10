@@ -154,6 +154,7 @@ erDiagram
         numeric price
         date start_date
         int capacity
+        int seats_taken
         jsonb itinerary
         text_array gallery
     }
@@ -499,6 +500,7 @@ Yatras: public listing and booking. Business key: `slug`.
 | `advanceAmount` | `advance_amount` | numeric(12,2) | >= 0 |
 | `capacity` | `capacity` | integer | >= 0 |
 | `eligibility` | `eligibility` | text |  |
+| `seatsTaken` | `seats_taken` | integer NOT NULL DEFAULT 0 | >= 0; derived: filled by triggers (migration 003), never written by clients or the store |
 | `status` | `status` | text | one of `draft`, `upcoming`, `ongoing`, `completed`, `cancelled` |
 | `registrationOpen` | `registration_open` | boolean |  |
 | `onlinePaymentEnabled` | `online_payment_enabled` | boolean |  |

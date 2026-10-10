@@ -34,9 +34,9 @@ after(async () => {
 const rejected = (c, id) => EXPECTED_REJECTS.some(([rc, rid]) => rc === c && rid === id);
 
 test('both migrations applied and recorded', async () => {
-  assert.deepEqual(result.applied.map((m) => m.version), ['001', '002']);
+  assert.deepEqual(result.applied.map((m) => m.version), ['001', '002', '003']);
   const { rows } = await pool.query('SELECT version, name, checksum, details FROM schema_migrations ORDER BY version');
-  assert.equal(rows.length, 2);
+  assert.equal(rows.length, 3);
   assert.ok(rows.every((r) => /^[0-9a-f]{64}$/.test(r.checksum)));
   const totals = rows[1].details.totals;
   assert.equal(totals.rejected, EXPECTED_REJECTS.length);
@@ -54,7 +54,12 @@ test('every legacy document reads back deep-equal through the new store', async 
       if (rejected(collection, d.id)) continue;
       const snap = await store.collection(collection).doc(d.id).get();
       assert.ok(snap.exists, `${collection}/${d.id} missing`);
-      assert.deepEqual(toJson(snap.data()), d.data, `${collection}/${d.id} differs`);
+      const got = toJson(snap.data());
+      if (collection === 'trips') { // migration 003 adds the derived seatsTaken to every trip
+        assert.ok(Number.isInteger(got.seatsTaken) && got.seatsTaken >= 0, `${d.id} seatsTaken`);
+        delete got.seatsTaken;
+      }
+      assert.deepEqual(got, d.data, `${collection}/${d.id} differs`);
       const st = stamps[`${collection}/${d.id}`];
       assert.equal(snap.version, st.version, `${collection}/${d.id} version`);
       assert.equal(snap.createTime.toString(), st.created, `${collection}/${d.id} created_at`);

@@ -17,6 +17,9 @@
  *   date       date, ONLY for strings shaped YYYY-MM-DD that are real calendar days
  *   textArray  text[] (array of strings)
  *   jsonb      any JSON value (nested arrays / objects)
+ *
+ * `derived: true` marks a column the database maintains (a trigger fills it, NOT NULL DEFAULT ...):
+ * the store never writes it, a document value for that key is ignored, reads return the column.
  */
 const RESERVED = new Set(['id', 'extra', 'version', 'created_at', 'updated_at']);
 

@@ -12,6 +12,7 @@ const PG_TO_STORE = {
   '23505': 'already-exists', // unique_violation (natural keys such as trips.slug)
   '23503': 'failed-precondition', // foreign_key_violation
   '23514': 'invalid-argument', // check_violation
+  'FL001': 'failed-precondition', // trigger: trip is full (migration 003); message is shown to the user as is
   '22P02': 'invalid-argument', // invalid_text_representation
   '22007': 'invalid-argument', // invalid_datetime_format
 };
@@ -19,7 +20,7 @@ const PG_TO_STORE = {
 /** Wrap a driver error as a StoreError when we know what it means; otherwise return it unchanged. */
 const mapPgError = (e) => {
   if (e instanceof StoreError || !e || !e.code || !PG_TO_STORE[e.code]) return e;
-  const out = new StoreError(PG_TO_STORE[e.code], e.detail ? `${e.message} (${e.detail})` : e.message);
+  const out = new StoreError(PG_TO_STORE[e.code], e.detail && e.code !== 'FL001' ? `${e.message} (${e.detail})` : e.message);
   out.pgCode = e.code;
   out.constraint = e.constraint;
   return out;
