@@ -12,8 +12,8 @@ body `{ "data": {...} }` and receives `{ "result": ... }`; errors come back as
 
 ```bash
 npm ci
-cp .env.example .env      # then fill in; export the vars (or use your process manager)
-npm run dev               # node --watch src/server.js
+cp .env.example .env.local   # then fill in; `npm run dev` loads .env.local automatically
+npm run dev                  # node --watch, with .env.local loaded
 npm start                 # production
 npm run lint
 npm test                  # node:test suites; starts a throwaway Postgres (see below)

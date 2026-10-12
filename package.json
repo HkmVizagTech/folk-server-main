@@ -5,7 +5,7 @@
   "main": "src/server.js",
   "scripts": {
     "start": "node src/server.js",
-    "dev": "node --watch src/server.js",
+    "dev": "node --watch --env-file-if-exists=.env.local src/server.js",
     "lint": "eslint src scripts test",
     "debug": "node scripts/debug.js",
     "test": "node --test test/*.test.js",

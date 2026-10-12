@@ -50,7 +50,7 @@ const env = {
     serviceAccountKey: str('SERVICE_ACCOUNT_KEY'),
     credentialsPath: str('GOOGLE_APPLICATION_CREDENTIALS'),
     defaultCredentialsPath: '/etc/secrets/serviceAccountKey.json',
-    projectId: str('GCLOUD_PROJECT') || null,
+    projectId: str('GCLOUD_PROJECT') || str('FIREBASE_PROJECT_ID') || null,
   },
 
   admin: {

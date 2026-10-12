@@ -29,8 +29,13 @@ if (inlineKey) {
   );
 }
 
+// Sign-in tokens can be verified with just the project id, so a developer
+// without a key file can still run the server locally. Anything that needs
+// real Google credentials (Firestore copy, listing accounts) logs and carries on.
+const DEFAULT_PROJECT_ID = 'folkvizag-b6830';
 admin.initializeApp({
   credential: credential || admin.credential.applicationDefault(),
+  projectId: env.firebase.projectId || DEFAULT_PROJECT_ID,
 });
 
 // The Firestore database (kept for the one-time copy into Postgres and as a
